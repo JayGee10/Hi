@@ -15,8 +15,25 @@ import pandas as pd
 import data as data_mod
 from volume_profile import low_volume_nodes, profile_arrays, session_profile
 
-CANDLE = "1h"
 N_BINS = 80
+# label -> pandas resample rule. The volume profile is independent of these;
+# only the candlesticks change when you switch timeframe.
+TIMEFRAMES = {"30m": "30min", "1h": "1h", "4h": "4h", "1D": "1D"}
+DEFAULT_TF = "1h"
+
+
+def candles(bars, rule: str) -> dict:
+    c = bars.resample(rule).agg(
+        open=("open", "first"), high=("high", "max"),
+        low=("low", "min"), close=("close", "last"),
+    ).dropna()
+    return {
+        "t": c.index.strftime("%Y-%m-%dT%H:%M:%S").tolist(),
+        "o": c["open"].round(2).tolist(),
+        "h": c["high"].round(2).tolist(),
+        "l": c["low"].round(2).tolist(),
+        "c": c["close"].round(2).tolist(),
+    }
 
 
 def contract_payload(path: str) -> dict:
@@ -25,22 +42,13 @@ def contract_payload(path: str) -> dict:
     prof = session_profile(bars, N_BINS)
     lvns = low_volume_nodes(centers, vol)
 
-    c = bars.resample(CANDLE).agg(
-        open=("open", "first"), high=("high", "max"),
-        low=("low", "min"), close=("close", "last"),
-    ).dropna()
-
     stem = path.split("/")[-1].replace(".Last.txt", "").replace(".txt", "")
     name = stem.split("MNQ_")[-1] if "MNQ_" in stem else stem.split("-")[-1]
     rng = f"{bars.index[0]:%Y-%m-%d} → {bars.index[-1]:%Y-%m-%d}"
     return {
         "name": name,
         "range": rng,
-        "t": c.index.strftime("%Y-%m-%dT%H:%M:%S").tolist(),
-        "o": c["open"].round(2).tolist(),
-        "h": c["high"].round(2).tolist(),
-        "l": c["low"].round(2).tolist(),
-        "c": c["close"].round(2).tolist(),
+        "tf": {label: candles(bars, rule) for label, rule in TIMEFRAMES.items()},
         "vp_price": [round(float(x), 2) for x in centers],
         "vp_vol": [round(float(x), 1) for x in vol],
         "poc": round(prof.poc, 2),
@@ -67,7 +75,9 @@ __PLOTLY_JS__
   h1 { font-size: 16px; margin: 0 0 8px; }
   .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   select { background: #ffffff; color: #1f2328; border: 1px solid #d0d7de;
-           border-radius: 8px; padding: 8px 10px; font-size: 15px; flex: 1; }
+           border-radius: 8px; padding: 8px 10px; font-size: 15px; }
+  #pick { flex: 1; }
+  #tf { flex: 0 0 auto; }
   .meta { font-size: 12px; color: #57606a; }
   .legend { font-size: 11px; color: #57606a; padding: 6px 12px; }
   .sw { display:inline-block; width:10px; height:10px; border-radius:2px;
@@ -80,6 +90,7 @@ __PLOTLY_JS__
   <h1>MNQ — Session Volume Profile</h1>
   <div class="row">
     <select id="pick"></select>
+    <select id="tf"></select>
   </div>
   <div class="meta" id="meta"></div>
 </header>
@@ -99,13 +110,16 @@ function hline(y, color, width, dash){
           line:{color:color, width:width, dash:dash||"solid"}, layer:"above"};
 }
 
-function draw(key){
+function draw(key, tf){
   const d = DATA[key];
-  document.getElementById("meta").textContent = d.range + "  ·  POC " + d.poc +
-      "  ·  VA " + d.val + "–" + d.vah + "  ·  " + d.lvns.length + " LVN zones";
+  const k = d.tf[tf] ? tf : Object.keys(d.tf)[0];
+  const bars = d.tf[k];
+  document.getElementById("meta").textContent = d.range + "  ·  " + k +
+      "  ·  POC " + d.poc + "  ·  VA " + d.val + "–" + d.vah +
+      "  ·  " + d.lvns.length + " LVN zones";
 
-  const candle = {type:"candlestick", x:d.t, open:d.o, high:d.h, low:d.l, close:d.c,
-    xaxis:"x", yaxis:"y", name:"price",
+  const candle = {type:"candlestick", x:bars.t, open:bars.o, high:bars.h,
+    low:bars.l, close:bars.c, xaxis:"x", yaxis:"y", name:"price",
     increasing:{line:{color:"#2da44e"}}, decreasing:{line:{color:"#cf222e"}}};
 
   const colors = d.vp_price.map(p => (p>=d.val && p<=d.vah) ? "#1f6feb" : "#b1b8c0");
@@ -155,12 +169,23 @@ Object.keys(DATA).forEach(k => {
   o.value = k; o.textContent = "MNQ " + k + "  (" + DATA[k].range + ")";
   sel.appendChild(o);
 });
-sel.addEventListener("change", e => draw(e.target.value));
 
-const def = DATA["0626"] ? "0626" : Object.keys(DATA)[0];
-sel.value = def;
-draw(def);
-window.addEventListener("resize", () => draw(sel.value));
+const tfSel = document.getElementById("tf");
+const anyTf = DATA[Object.keys(DATA)[0]].tf;
+Object.keys(anyTf).forEach(k => {
+  const o = document.createElement("option");
+  o.value = k; o.textContent = k;
+  tfSel.appendChild(o);
+});
+
+function render(){ draw(sel.value, tfSel.value); }
+sel.addEventListener("change", render);
+tfSel.addEventListener("change", render);
+window.addEventListener("resize", render);
+
+sel.value = DATA["0626"] ? "0626" : Object.keys(DATA)[0];
+tfSel.value = "__DEFAULT_TF__";
+render();
 </script>
 </body>
 </html>
@@ -185,9 +210,11 @@ def main(argv):
     for p in paths:
         d = contract_payload(p)
         payload[d["name"]] = d
-        print(f"  {d['name']}: {d['range']}  {len(d['t'])} candles, {len(d['lvns'])} LVN")
+        print(f"  {d['name']}: {d['range']}  "
+              f"{len(d['tf'][DEFAULT_TF]['t'])} {DEFAULT_TF}-candles, {len(d['lvns'])} LVN")
     html = (TEMPLATE
             .replace("__PLOTLY_JS__", plotly_script())
+            .replace("__DEFAULT_TF__", DEFAULT_TF)
             .replace("__DATA__", json.dumps(payload)))
     with open(out, "w") as fh:
         fh.write(html)
