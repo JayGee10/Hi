@@ -15,7 +15,7 @@ import json
 import sys
 
 import data as data_mod
-from volume_profile import session_profile
+from volume_profile import low_volume_nodes, profile_arrays, session_profile
 
 N_BINS = 80
 # label -> pandas resample rule. The volume profile is rebuilt client-side from
@@ -40,25 +40,51 @@ def candles(bars, rule: str) -> dict:
     }
 
 
-def window_payload(bars, label: str, rng: str) -> dict:
-    """Build the per-timeframe candles + fixed price range for one week window.
+def candles_by_tf(bars) -> dict:
+    return {lbl: candles(bars, rule) for lbl, rule in TIMEFRAMES.items()}
 
-    The volume profile is computed client-side over fixed bins spanning the
-    window's full high/low, so it can develop as candles replay in. `poc/vah/val`
-    here are a Python reference (full-resolution) shown only in the console.
+
+def fixed_vp(bars) -> dict | None:
+    """Precompute a complete (fixed) volume profile for a set of bars.
+
+    Returns the volume-at-price histogram plus POC/VAH/VAL/LVN, computed at full
+    bar resolution. Used for reference profiles whose levels are drawn over a
+    *different* set of candles (e.g. last week's levels over this week's price).
     """
     prof = session_profile(bars, N_BINS)
+    if prof is None:
+        return None
+    centers, vol = profile_arrays(bars, N_BINS)
+    lvns = low_volume_nodes(centers, vol)
     return {
-        "label": label,
-        "range": rng,
-        "tf": {lbl: candles(bars, rule) for lbl, rule in TIMEFRAMES.items()},
+        "price": [round(float(x), 2) for x in centers],
+        "vol": [round(float(x), 1) for x in vol],
+        "poc": round(prof.poc, 2), "vah": round(prof.vah, 2), "val": round(prof.val, 2),
+        "lvns": [[round(lo, 2), round(hi, 2)] for lo, hi in lvns],
+    }
+
+
+def developing_window(bars, label: str, rng: str) -> dict:
+    """A window whose VP rebuilds client-side as candles replay in."""
+    return {
+        "label": label, "range": rng, "develop": True,
+        "tf": candles_by_tf(bars),
         "lo": round(float(bars["low"].min()), 2),
         "hi": round(float(bars["high"].max()), 2),
-        "nbins": N_BINS,
-        "ref": None if prof is None else {
-            "poc": round(prof.poc, 2), "vah": round(prof.vah, 2),
-            "val": round(prof.val, 2),
-        },
+        "nbins": N_BINS, "fixedVP": None,
+    }
+
+
+def fixed_window(profile_bars, candle_bars, label: str,
+                 levels_rng: str, price_rng: str) -> dict | None:
+    """A window that draws a FIXED profile (from `profile_bars`) as reference
+    levels over `candle_bars` candles — the levels do not develop on replay."""
+    fv = fixed_vp(profile_bars)
+    if fv is None:
+        return None
+    return {
+        "label": label, "range": levels_rng, "priceRange": price_rng,
+        "develop": False, "tf": candles_by_tf(candle_bars), "fixedVP": fv,
     }
 
 
@@ -71,11 +97,17 @@ def contract_payload(path: str) -> dict:
 
     windows: dict[str, dict] = {}
     if not this_bars.empty:
-        windows["this"] = window_payload(
+        windows["this"] = developing_window(
             this_bars, "This week (developing)", info["this_range"])
     if not last_bars.empty:
-        windows["last"] = window_payload(
-            last_bars, "Last week (fixed)", info["last_range"])
+        # Last week's levels (fixed) drawn over this week's candles for reference;
+        # fall back to last week's own candles if there is no current week yet.
+        disp = this_bars if not this_bars.empty else last_bars
+        price_rng = info["this_range"] if not this_bars.empty else info["last_range"]
+        w = fixed_window(last_bars, disp, "Last week (fixed)",
+                         info["last_range"], price_rng)
+        if w is not None:
+            windows["last"] = w
 
     return {"name": name, "open_hour": info["open_hour"], "windows": windows}
 
@@ -238,24 +270,31 @@ function draw(){
     xaxis:"x", yaxis:"y", name:"price",
     increasing:{line:{color:"#2da44e"}}, decreasing:{line:{color:"#cf222e"}}};
 
-  const pr = profileVol(bars, w.lo, w.hi, w.nbins, upTo);
-  const va = valueArea(pr.vol);
-  const bands = lvnBands(pr.centers, pr.vol, pr.step);
-
-  let poc, vah, val, inVA = () => false;
-  if (va){
-    poc = pr.centers[va.poc]; vah = pr.centers[va.hi]; val = pr.centers[va.lo];
-    inVA = (p) => p >= val && p <= vah;
+  // Volume profile: develop it client-side from the revealed candles, OR draw a
+  // fixed precomputed profile (its levels stay put as candles replay in).
+  let centers, vols, poc, vah, val, bands, inVA = () => false;
+  if (w.develop){
+    const pr = profileVol(bars, w.lo, w.hi, w.nbins, upTo);
+    centers = pr.centers; vols = pr.vol;
+    const va = valueArea(pr.vol);
+    bands = lvnBands(pr.centers, pr.vol, pr.step);
+    if (va){ poc = centers[va.poc]; vah = centers[va.hi]; val = centers[va.lo]; }
+  } else {
+    const fv = w.fixedVP;
+    centers = fv.price; vols = fv.vol;
+    poc = fv.poc; vah = fv.vah; val = fv.val; bands = fv.lvns;
   }
-  LEVELS = va ? {poc:poc, vah:vah, val:val} : null;
+  const hasVA = (poc !== undefined);
+  if (hasVA) inVA = (p) => p >= val && p <= vah;
+  LEVELS = hasVA ? {poc:poc, vah:vah, val:val} : null;
 
-  const colors = pr.centers.map(p => inVA(p) ? "#1f6feb" : "#b1b8c0");
-  const vp = {type:"bar", orientation:"h", x:pr.vol, y:pr.centers,
+  const colors = centers.map(p => inVA(p) ? "#1f6feb" : "#b1b8c0");
+  const vp = {type:"bar", orientation:"h", x:vols, y:centers,
     xaxis:"x2", yaxis:"y", marker:{color:colors}, opacity:0.85,
     name:"volume", hoverinfo:"skip"};
 
   const shapes = [], ann = [];
-  if (va){
+  if (hasVA){
     shapes.push(
       {type:"rect", xref:"paper", x0:0, x1:1, yref:"y", y0:val, y1:vah,
        fillcolor:"#1f6feb", opacity:0.06, line:{width:0}, layer:"below"},
@@ -268,15 +307,18 @@ function draw(){
       {xref:"paper", x:0.005, y:val, yref:"y", text:"VAL", showarrow:false,
        font:{color:POC, size:10}, bgcolor:"#ffffff", xanchor:"left"});
   }
-  bands.forEach(b => shapes.push(
+  (bands || []).forEach(b => shapes.push(
     {type:"rect", xref:"paper", x0:0, x1:1, yref:"y", y0:b[0], y1:b[1],
      fillcolor:LVN, opacity:0.13, line:{color:LVN, width:1, dash:"dot"}, layer:"below"}));
 
   const tag = (reveal === null) ? "full" : (upTo + "/" + n);
+  const src = w.develop
+    ? (w.range + "  ·  " + cur.tf + "  ·  " + tag)
+    : ("levels " + w.range + "  ·  price " + (w.priceRange || "") + "  ·  " + cur.tf + "  ·  " + tag + "  ·  FIXED");
   document.getElementById("meta").textContent =
-    w.label + "  ·  " + w.range + "  ·  " + cur.tf + "  ·  " + tag +
-    (va ? ("  ·  POC " + poc.toFixed(1) + "  ·  VA " + val.toFixed(1) + "–" + vah.toFixed(1)
-           + "  ·  " + bands.length + " LVN") : "");
+    w.label + "  ·  " + src +
+    (hasVA ? ("  ·  POC " + poc.toFixed(1) + "  ·  VA " + val.toFixed(1) + "–" + vah.toFixed(1)
+           + "  ·  " + (bands ? bands.length : 0) + " LVN") : "");
 
   const layout = {
     height: Math.max(420, Math.round(window.innerHeight * 0.72)),
