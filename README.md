@@ -64,10 +64,24 @@ The trading-week boundary is auto-detected from the data's daily maintenance
 gap (the builder prints the detected session-open time — `17:00` for
 exchange/Central exports, `18:00` for Eastern), so no timezone needs hardcoding.
 
-Dropdowns switch contract / window / timeframe. A **replay** control (play,
-step, reset, scrub, speed) reveals candles one at a time while the volume
-profile (POC / value area / LVN boxes) rebuilds in step — like TradingView bar
-replay.
+There is also a **Daily** mode (per-day Globex session, pick any day):
+
+- full-day candles with a vertical line at the **9:30 cash open**,
+- the **overnight** session VP with its LVN zones marked (the 9:30-open focus),
+- the **RTH 9:30–3pm** VP shown side by side — it appears in replay once 3pm
+  is reached,
+- a label for where the 9:30 open landed vs overnight value (inside / above /
+  below), plus an **aggregate** across all days (% open-in-value and how often
+  the cash session closed up).
+
+Cash-session times auto-adjust to the data's timezone (9:30 ET = 8:30 in CT
+exports).
+
+Dropdowns switch contract / window / day / timeframe. A **crosshair** follows
+the cursor with a price/time readout and distance to the levels. A **replay**
+control (play, step, reset, scrub, speed) reveals candles one at a time while
+the volume profile (POC / value area / LVN boxes) rebuilds in step — like
+TradingView bar replay.
 
 ## Files
 

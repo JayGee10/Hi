@@ -130,6 +130,49 @@ def trading_week_windows(bars: pd.DataFrame, open_hour: int | None = None):
     return last_week, this_week, info
 
 
+def rth_minutes(open_hour: int) -> tuple[int, int]:
+    """Cash-session open and 3pm cutoff as minutes-from-midnight in data-local time.
+
+    The regular session is 9:30–16:00 ET; we anchor on the 9:30 open and the
+    3pm boundary. Both shift with the data's timezone, inferred from the detected
+    session-open hour (18 = ET → no shift, 17 = CT → one hour earlier).
+    """
+    shift = (open_hour - 18) * 60
+    cash_open = 9 * 60 + 30 + shift   # 09:30 ET (08:30 CT)
+    day_cut = 15 * 60 + shift         # 15:00 ET (14:00 CT) — the "3pm" line
+    return cash_open, day_cut
+
+
+def daily_sessions(bars: pd.DataFrame, open_hour: int | None = None):
+    """Split bars into per-day Globex sessions, each carved into overnight + RTH.
+
+    Each trading day (session date, see ``trade_session_date``) runs from the
+    prior evening open through the next open. Within it:
+      - overnight = session start → 9:30 cash open
+      - rth       = 9:30 cash open → 3pm cutoff (the "9:30–2:59pm" profile)
+
+    Returns ``(sessions, open_hour)`` where ``sessions`` is a list of dicts with
+    keys: ``date`` (session date), ``co`` (cash-open ts), ``cut`` (3pm ts),
+    ``session`` (full-day bars), ``overnight``, ``rth``.
+    """
+    if open_hour is None:
+        open_hour = detect_session_open_hour(bars)
+    cash_open, day_cut = rth_minutes(open_hour)
+
+    key = pd.Series(trade_session_date(bars.index, open_hour), index=bars.index)
+    out = []
+    for d, g in bars.groupby(key):
+        d = pd.Timestamp(d)
+        co = d + pd.Timedelta(minutes=cash_open)
+        cut = d + pd.Timedelta(minutes=day_cut)
+        out.append({
+            "date": d, "co": co, "cut": cut, "session": g,
+            "overnight": g[g.index < co],
+            "rth": g[(g.index >= co) & (g.index < cut)],
+        })
+    return out, open_hour
+
+
 def synthetic(
     days: int = 180,
     bars_per_day: int = 78,        # ~6.5h of 5-min bars
