@@ -31,7 +31,8 @@ from volume_profile import Profile, build_profiles
 BREAK_ATR = 0.5      # close this far past a level (in ATR) => break/acceptance
 REACTION_ATR = 0.5   # move this far back off a level (in ATR) => hold/rejection
 CONFLUENCE_ATR = 0.25  # daily & weekly level within this distance => confluence
-LOOKAHEAD = {"daily": 24, "weekly": 78}  # bars to resolve a touch
+# How long a touch has to resolve, in MINUTES (auto-scaled to the file's bar size).
+LOOKAHEAD_MIN = {"daily": 480, "weekly": 1440}
 
 
 @dataclass
@@ -42,6 +43,15 @@ class TestResult:
     outcome: str          # 'hold' | 'break' | 'unresolved'
     reaction_atr: float    # favorable excursion if hold, else 0
     confluent: bool
+
+
+def bar_minutes(bars: pd.DataFrame) -> float:
+    """Infer the bar interval in minutes (ignoring overnight/session gaps)."""
+    secs = bars.index.to_series().diff().dt.total_seconds()
+    intraday = secs[(secs > 0) & (secs <= 3600)]
+    if intraday.empty:
+        return 1.0
+    return max(1.0, float(intraday.median()) / 60.0)
 
 
 def daily_atr(bars: pd.DataFrame, n: int = 14) -> pd.Series:
@@ -91,11 +101,12 @@ def test_timeframe(
     profiles: list[Profile],
     timeframe: str,
     atr: pd.Series,
+    bar_min: float,
     weekly_lookup: dict | None = None,
 ) -> list[TestResult]:
     """Test each session's price action against the *previous* session's levels."""
     results: list[TestResult] = []
-    look = LOOKAHEAD[timeframe]
+    look = max(1, round(LOOKAHEAD_MIN[timeframe] / bar_min))
     rule = "D" if timeframe == "daily" else "W"
     sessions = {s: g for s, g in bars.groupby(pd.Grouper(freq=rule))}
     session_keys = sorted(sessions.keys())
@@ -173,28 +184,50 @@ def summarize_confluence(results: list[TestResult]) -> None:
         print(f"  edge from confluence    : {edge:+.1%}")
 
 
-def main(argv: list[str]) -> None:
-    if len(argv) > 1:
-        print(f"loading {argv[1]} ...")
-        bars = data_mod.load_csv(argv[1])
-    else:
-        print("no CSV given — using synthetic intraday data")
-        bars = data_mod.synthetic()
-    print(f"{len(bars):,} bars  {bars.index[0]} -> {bars.index[-1]}")
-
+def run_one(bars: pd.DataFrame) -> list[TestResult]:
+    """Build profiles and run daily + weekly level tests for one dataset."""
     atr = daily_atr(bars)
+    bar_min = bar_minutes(bars)
     daily_profiles = build_profiles(bars, "D")
     weekly_profiles = build_profiles(bars, "W")
     weekly_lookup = {p.session: p for p in weekly_profiles}
-    print(f"built {len(daily_profiles)} daily and {len(weekly_profiles)} weekly profiles")
+    print(f"built {len(daily_profiles)} daily and {len(weekly_profiles)} weekly profiles "
+          f"({bar_min:.0f}-min bars)")
 
     results: list[TestResult] = []
-    results += test_timeframe(bars, daily_profiles, "daily", atr, weekly_lookup)
-    results += test_timeframe(bars, weekly_profiles, "weekly", atr)
+    results += test_timeframe(bars, daily_profiles, "daily", atr, bar_min, weekly_lookup)
+    results += test_timeframe(bars, weekly_profiles, "weekly", atr, bar_min)
+    return results
 
+
+def report(results: list[TestResult]) -> None:
     summarize(results, "daily")
     summarize(results, "weekly")
     summarize_confluence(results)
+
+
+def main(argv: list[str]) -> None:
+    paths = argv[1:]
+    if not paths:
+        print("no CSV given — using synthetic intraday data")
+        bars = data_mod.synthetic()
+        print(f"{len(bars):,} bars  {bars.index[0]} -> {bars.index[-1]}")
+        report(run_one(bars))
+        return
+
+    pooled: list[TestResult] = []
+    for path in paths:
+        name = path.split("/")[-1]
+        print(f"\n############## {name} ##############")
+        bars = data_mod.load_csv(path)
+        print(f"{len(bars):,} bars  {bars.index[0]} -> {bars.index[-1]}")
+        results = run_one(bars)
+        report(results)
+        pooled += results
+
+    if len(paths) > 1:
+        print(f"\n############## COMBINED ({len(paths)} files) ##############")
+        report(pooled)
 
 
 if __name__ == "__main__":
