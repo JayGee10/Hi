@@ -133,14 +133,34 @@ def session_profile(
 
 
 def build_profiles(bars: pd.DataFrame, rule: str, **kwargs) -> list[Profile]:
-    """Build one profile per session.
+    """Build one profile per calendar session.
 
     `rule` is a pandas resample/grouping rule: 'D' for daily sessions,
-    'W' for weekly sessions.
+    'W' for weekly sessions. Used for synthetic data; real futures should use
+    `build_session_profiles` for true CME session boundaries.
     """
     profiles: list[Profile] = []
     for _, group in bars.groupby(pd.Grouper(freq=rule)):
         p = session_profile(group, **kwargs)
         if p is not None:
+            profiles.append(p)
+    return profiles
+
+
+def build_session_profiles(bars: pd.DataFrame, session: str = "RTH",
+                           freq: str = "D", src_tz: str = "UTC",
+                           **kwargs) -> list[Profile]:
+    """Build one profile per CME trading session (RTH/ETH, daily/weekly).
+
+    `bars` may be raw UTC or already tz-aware Eastern. Each returned Profile's
+    `session` field is set to the session key (the trade-date / week start).
+    """
+    import sessions as _sessions  # local import avoids a hard dependency cycle
+
+    profiles: list[Profile] = []
+    for key, group in _sessions.iter_sessions(bars, session, freq, src_tz):
+        p = session_profile(group, **kwargs)
+        if p is not None:
+            p.session = key
             profiles.append(p)
     return profiles
