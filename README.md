@@ -23,25 +23,35 @@ session.
 ```bash
 pip install -r requirements.txt
 
-python backtest.py            # synthetic intraday data (runs out of the box)
-python backtest.py data.csv   # your own intraday OHLCV
+python backtest.py                   # synthetic intraday data (runs out of the box)
+python backtest.py data.csv          # one intraday OHLCV file
+python backtest.py a.txt b.txt c.txt # many files -> per-file + pooled COMBINED
 ```
 
-### CSV format
+Pass several files (e.g. consecutive futures contracts) to pool them into one
+`COMBINED` summary — useful because per-contract weekly samples are small.
 
-Intraday bars (5-min, 1-min, etc.). Columns (case-insensitive):
+### Accepted data formats
 
-```
-timestamp,open,high,low,close,volume
-2024-01-02 09:30:00,100.0,100.4,99.8,100.2,1200
-```
+The loader auto-detects both of these:
 
-Finer bars → more accurate profiles.
+1. **Comma + header** (case-insensitive columns):
+   ```
+   timestamp,open,high,low,close,volume
+   2024-01-02 09:30:00,100.0,100.4,99.8,100.2,1200
+   ```
+2. **Headerless NinjaTrader export** (semicolon-delimited):
+   ```
+   20250919 040100;24712.5;24715;24709.5;24712.75;271
+   ```
+
+Finer bars → more accurate profiles. The lookahead auto-scales to the file's
+bar size, so 1-min and 5-min data both work.
 
 ## Files
 
 - `volume_profile.py` – builds the per-session profile and extracts POC/VAH/VAL
-- `data.py` – CSV loader + synthetic data generator
+- `data.py` – CSV/NinjaTrader loader + synthetic data generator
 - `backtest.py` – runs the tests and prints the summary
 
 ## Tuning
@@ -51,11 +61,12 @@ Thresholds live at the top of `backtest.py`:
 - `BREAK_ATR` – distance past a level (in ATR) that counts as a break
 - `REACTION_ATR` – move off a level (in ATR) that counts as a hold
 - `CONFLUENCE_ATR` – how close daily & weekly levels must be to be "confluent"
-- `LOOKAHEAD` – bars allowed to resolve a touch (per timeframe)
+- `LOOKAHEAD_MIN` – minutes allowed to resolve a touch (per timeframe), auto-
+  scaled to the data's bar interval
 
 ## Notes
 
-- A touch is **unresolved** if it neither holds nor breaks within `LOOKAHEAD`.
-- The **confluence** metric needs varied/trending data to be meaningful. On the
-  range-bound synthetic data nearly every daily level overlaps a weekly one, so
-  feed real data to read that number.
+- A touch is **unresolved** if it neither holds nor breaks within `LOOKAHEAD_MIN`.
+- "Session" is the calendar day / week. For 24h futures you may want to redefine
+  it as the exchange RTH/ETH session — that will change the levels and results.
+- The **confluence** metric needs varied/trending data to be meaningful.

@@ -13,19 +13,50 @@ import pandas as pd
 def load_csv(path: str) -> pd.DataFrame:
     """Load intraday OHLCV bars.
 
-    Expected columns (case-insensitive): timestamp, open, high, low, close,
-    volume. `timestamp` is parsed as the DatetimeIndex.
+    Handles two shapes automatically:
+      1. Comma-separated with a header row containing timestamp/open/high/...
+      2. Headerless NinjaTrader-style exports:
+         `yyyyMMdd HHmmss;open;high;low;close;volume` (semicolon-delimited).
+
+    Returns a DataFrame indexed by timestamp with columns
+    open, high, low, close, volume.
     """
-    df = pd.read_csv(path)
-    df.columns = [c.strip().lower() for c in df.columns]
-    ts_col = next(c for c in df.columns if c in ("timestamp", "date", "datetime", "time"))
-    df[ts_col] = pd.to_datetime(df[ts_col])
-    df = df.set_index(ts_col).sort_index()
+    with open(path) as fh:
+        first = fh.readline().strip()
+
+    delim = ";" if first.count(";") >= first.count(",") else ","
+    fields = first.split(delim)
+    # treat as headerless if the 2nd field parses as a number
+    try:
+        float(fields[1])
+        has_header = False
+    except (ValueError, IndexError):
+        has_header = True
+
+    if has_header:
+        df = pd.read_csv(path, sep=delim)
+        df.columns = [c.strip().lower() for c in df.columns]
+    else:
+        cols = ["timestamp", "open", "high", "low", "close", "volume"][: len(fields)]
+        df = pd.read_csv(path, sep=delim, header=None, names=cols)
+
+    ts_col = next(
+        (c for c in df.columns if c in ("timestamp", "date", "datetime", "time")),
+        df.columns[0],
+    )
+    raw_ts = df[ts_col].astype(str)
+    # NinjaTrader stamps look like "20250919 040100"; fall back to generic parse
+    ts = pd.to_datetime(raw_ts, format="%Y%m%d %H%M%S", errors="coerce")
+    if ts.isna().all():
+        ts = pd.to_datetime(raw_ts, errors="coerce")
+    df[ts_col] = ts
+    df = df.dropna(subset=[ts_col]).set_index(ts_col).sort_index()
+
     needed = ["open", "high", "low", "close", "volume"]
     missing = [c for c in needed if c not in df.columns]
     if missing:
         raise ValueError(f"CSV missing columns: {missing}")
-    return df[needed]
+    return df[needed].astype(float)
 
 
 def synthetic(
