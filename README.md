@@ -48,11 +48,33 @@ The loader auto-detects both of these:
 Finer bars → more accurate profiles. The lookahead auto-scales to the file's
 bar size, so 1-min and 5-min data both work.
 
+## Interactive viewer (phone-friendly)
+
+```bash
+python build_html.py out.html MNQ_*.Last.txt   # one self-contained HTML for all contracts
+```
+
+For each MNQ contract the viewer builds two trading-week windows:
+
+- **This week (developing)** – anchored to this week's Sunday open, up to the
+  file's last bar.
+- **Last week (fixed)** – the prior *completed* Sunday-open → Friday-close week.
+
+The trading-week boundary is auto-detected from the data's daily maintenance
+gap (the builder prints the detected session-open time — `17:00` for
+exchange/Central exports, `18:00` for Eastern), so no timezone needs hardcoding.
+
+Dropdowns switch contract / window / timeframe. A **replay** control (play,
+step, reset, scrub, speed) reveals candles one at a time while the volume
+profile (POC / value area / LVN boxes) rebuilds in step — like TradingView bar
+replay.
+
 ## Files
 
 - `volume_profile.py` – builds the per-session profile and extracts POC/VAH/VAL
-- `data.py` – CSV/NinjaTrader loader + synthetic data generator
+- `data.py` – CSV/NinjaTrader loader, synthetic data, trading-week windowing
 - `backtest.py` – runs the tests and prints the summary
+- `build_html.py` – interactive HTML viewer (two week profiles + candle replay)
 
 ## Tuning
 

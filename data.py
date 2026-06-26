@@ -59,6 +59,77 @@ def load_csv(path: str) -> pd.DataFrame:
     return df[needed].astype(float)
 
 
+def detect_session_open_hour(bars: pd.DataFrame, default: int = 18) -> int:
+    """Infer the hour of day the trading session/day opens.
+
+    CME index futures (MNQ) halt for ~60 min once a day. The bar right after
+    that daily break marks the session open. We look at the gaps between
+    consecutive bars, keep the "daily break" sized ones (roughly 45 min to 5 h,
+    which excludes the much larger weekend gap), and return the most common
+    hour-of-day of the bar that *follows* such a gap.
+
+    Returns 17 for exchange/Central-time exports, 18 for Eastern-time exports.
+    Falls back to `default` (18) when no clear daily break is present.
+    """
+    if len(bars) < 2:
+        return default
+    idx = bars.index
+    gaps = idx.to_series().diff()
+    secs = gaps.dt.total_seconds()
+    is_break = (secs >= 45 * 60) & (secs <= 5 * 3600)
+    open_hours = idx[is_break.to_numpy()].hour
+    if len(open_hours) == 0:
+        return default
+    return int(pd.Series(open_hours).mode().iloc[0])
+
+
+def trade_session_date(index: pd.DatetimeIndex, open_hour: int) -> pd.DatetimeIndex:
+    """Map each timestamp to the calendar date of its trading session.
+
+    The evening session rolls into the next day (e.g. Sunday 18:00 belongs to
+    Monday's session), so shifting forward by ``24 - open_hour`` hours and
+    normalizing puts every bar on its session date.
+    """
+    return (index + pd.Timedelta(hours=24 - open_hour)).normalize()
+
+
+def trading_week_windows(bars: pd.DataFrame, open_hour: int | None = None):
+    """Split bars into the last completed and the current trading week.
+
+    A trading week runs from the Sunday-evening open through Friday's close.
+    Using the session date (see ``trade_session_date``), each bar is assigned a
+    Monday-based week key; the week containing the final bar is "this week" and
+    the week before it is "last week".
+
+    Returns ``(last_week_bars, this_week_bars, info)`` where either frame may be
+    empty (e.g. a contract that ends mid-week or lacks a full prior week near
+    rollover) and ``info`` carries the detected open hour plus date ranges.
+    """
+    if open_hour is None:
+        open_hour = detect_session_open_hour(bars)
+
+    sd = trade_session_date(bars.index, open_hour)
+    week_key = sd - pd.to_timedelta(sd.weekday, unit="D")  # Monday of the session week
+
+    this_key = week_key[-1]
+    last_key = this_key - pd.Timedelta(days=7)
+
+    this_week = bars[week_key == this_key]
+    last_week = bars[week_key == last_key]
+
+    def _range(df: pd.DataFrame) -> str:
+        if df.empty:
+            return ""
+        return f"{df.index[0]:%Y-%m-%d %H:%M} → {df.index[-1]:%Y-%m-%d %H:%M}"
+
+    info = {
+        "open_hour": open_hour,
+        "this_range": _range(this_week),
+        "last_range": _range(last_week),
+    }
+    return last_week, this_week, info
+
+
 def synthetic(
     days: int = 180,
     bars_per_day: int = 78,        # ~6.5h of 5-min bars

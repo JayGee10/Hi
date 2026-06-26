@@ -1,6 +1,10 @@
 """Build a self-contained, phone-friendly HTML to explore Session Volume
-Profiles for one or more contracts: interactive candles + volume profile, with
-POC / value area and LVN boxes. A dropdown switches contracts.
+Profiles for one or more MNQ contracts.
+
+For each contract it carves out two trading-week windows — last completed week
+(fixed range) and this developing week (anchored to the Sunday open) — and lets
+you replay the candles one at a time while the volume profile (POC / value area
+/ LVN boxes) rebuilds in step. Dropdowns switch contract, window and timeframe.
 
 Run:  python build_html.py out.html file1.txt [file2.txt ...]
 """
@@ -10,14 +14,12 @@ from __future__ import annotations
 import json
 import sys
 
-import pandas as pd
-
 import data as data_mod
-from volume_profile import low_volume_nodes, profile_arrays, session_profile
+from volume_profile import session_profile
 
 N_BINS = 80
-# label -> pandas resample rule. The volume profile is independent of these;
-# only the candlesticks change when you switch timeframe.
+# label -> pandas resample rule. The volume profile is rebuilt client-side from
+# whichever timeframe's candles are showing, so it grows in step with replay.
 TIMEFRAMES = {"30m": "30min", "1h": "1h", "4h": "4h", "1D": "1D"}
 DEFAULT_TF = "1h"
 
@@ -26,6 +28,7 @@ def candles(bars, rule: str) -> dict:
     c = bars.resample(rule).agg(
         open=("open", "first"), high=("high", "max"),
         low=("low", "min"), close=("close", "last"),
+        volume=("volume", "sum"),
     ).dropna()
     return {
         "t": c.index.strftime("%Y-%m-%dT%H:%M:%S").tolist(),
@@ -33,29 +36,48 @@ def candles(bars, rule: str) -> dict:
         "h": c["high"].round(2).tolist(),
         "l": c["low"].round(2).tolist(),
         "c": c["close"].round(2).tolist(),
+        "v": c["volume"].round(1).tolist(),
+    }
+
+
+def window_payload(bars, label: str, rng: str) -> dict:
+    """Build the per-timeframe candles + fixed price range for one week window.
+
+    The volume profile is computed client-side over fixed bins spanning the
+    window's full high/low, so it can develop as candles replay in. `poc/vah/val`
+    here are a Python reference (full-resolution) shown only in the console.
+    """
+    prof = session_profile(bars, N_BINS)
+    return {
+        "label": label,
+        "range": rng,
+        "tf": {lbl: candles(bars, rule) for lbl, rule in TIMEFRAMES.items()},
+        "lo": round(float(bars["low"].min()), 2),
+        "hi": round(float(bars["high"].max()), 2),
+        "nbins": N_BINS,
+        "ref": None if prof is None else {
+            "poc": round(prof.poc, 2), "vah": round(prof.vah, 2),
+            "val": round(prof.val, 2),
+        },
     }
 
 
 def contract_payload(path: str) -> dict:
     bars = data_mod.load_csv(path)
-    centers, vol = profile_arrays(bars, N_BINS)
-    prof = session_profile(bars, N_BINS)
-    lvns = low_volume_nodes(centers, vol)
+    last_bars, this_bars, info = data_mod.trading_week_windows(bars)
 
     stem = path.split("/")[-1].replace(".Last.txt", "").replace(".txt", "")
     name = stem.split("MNQ_")[-1] if "MNQ_" in stem else stem.split("-")[-1]
-    rng = f"{bars.index[0]:%Y-%m-%d} → {bars.index[-1]:%Y-%m-%d}"
-    return {
-        "name": name,
-        "range": rng,
-        "tf": {label: candles(bars, rule) for label, rule in TIMEFRAMES.items()},
-        "vp_price": [round(float(x), 2) for x in centers],
-        "vp_vol": [round(float(x), 1) for x in vol],
-        "poc": round(prof.poc, 2),
-        "vah": round(prof.vah, 2),
-        "val": round(prof.val, 2),
-        "lvns": [[round(lo, 2), round(hi, 2)] for lo, hi in lvns],
-    }
+
+    windows: dict[str, dict] = {}
+    if not this_bars.empty:
+        windows["this"] = window_payload(
+            this_bars, "This week (developing)", info["this_range"])
+    if not last_bars.empty:
+        windows["last"] = window_payload(
+            last_bars, "Last week (fixed)", info["last_range"])
+
+    return {"name": name, "open_hour": info["open_hour"], "windows": windows}
 
 
 TEMPLATE = """<!DOCTYPE html>
@@ -73,11 +95,18 @@ __PLOTLY_JS__
   header { padding: 10px 12px; position: sticky; top: 0; background: #ffffff;
            border-bottom: 1px solid #d0d7de; z-index: 5; }
   h1 { font-size: 16px; margin: 0 0 8px; }
-  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  select { background: #ffffff; color: #1f2328; border: 1px solid #d0d7de;
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .row + .row { margin-top: 8px; }
+  select, button { background: #ffffff; color: #1f2328; border: 1px solid #d0d7de;
            border-radius: 8px; padding: 8px 10px; font-size: 15px; }
-  #pick { flex: 1; }
+  button { cursor: pointer; -webkit-tap-highlight-color: transparent; min-width: 42px; }
+  button:active { background: #f0f3f6; }
+  button.on { background: #1f6feb; color: #fff; border-color: #1f6feb; }
+  #pick { flex: 1; min-width: 140px; }
+  #win { flex: 0 0 auto; }
   #tf { flex: 0 0 auto; }
+  #scrub { flex: 1; min-width: 120px; }
+  #speed { width: 90px; }
   .meta { font-size: 12px; color: #57606a; }
   .legend { font-size: 11px; color: #57606a; padding: 6px 12px; }
   .sw { display:inline-block; width:10px; height:10px; border-radius:2px;
@@ -90,7 +119,15 @@ __PLOTLY_JS__
   <h1>MNQ — Session Volume Profile</h1>
   <div class="row">
     <select id="pick"></select>
+    <select id="win"></select>
     <select id="tf"></select>
+  </div>
+  <div class="row">
+    <button id="play" title="Play / pause replay">▶</button>
+    <button id="step" title="Reveal next candle">⏭</button>
+    <button id="reset" title="Show full window">⟲</button>
+    <input id="scrub" type="range" min="1" max="1" value="1">
+    <label class="meta">speed <input id="speed" type="range" min="1" max="30" value="8"></label>
   </div>
   <div class="meta" id="meta"></div>
 </header>
@@ -104,49 +141,125 @@ __PLOTLY_JS__
 <script>
 const DATA = __DATA__;
 const POC="#1f6feb", LVN="#d1242f";
+const VA_PCT=0.70, LVN_REL=0.30;
+
+// --- volume-profile math (mirrors volume_profile.py) -------------------------
+function profileVol(bars, lo, hi, nbins, upTo){
+  if (hi <= lo) hi = lo + 1e-9;
+  const step = (hi - lo) / nbins;
+  const centers = new Array(nbins), vol = new Array(nbins).fill(0);
+  for (let i = 0; i < nbins; i++) centers[i] = lo + step * (i + 0.5);
+  const n = Math.min(upTo, bars.h.length);
+  for (let k = 0; k < n; k++){
+    const v = bars.v[k];
+    if (!(v > 0)) continue;
+    let loIdx = Math.floor((bars.l[k] - lo) / step);
+    let hiIdx = Math.floor((bars.h[k] - lo) / step);
+    loIdx = Math.max(0, Math.min(loIdx, nbins - 1));
+    hiIdx = Math.max(0, Math.min(hiIdx, nbins - 1));
+    const share = v / (hiIdx - loIdx + 1);
+    for (let b = loIdx; b <= hiIdx; b++) vol[b] += share;
+  }
+  return {centers, vol, step};
+}
+
+function valueArea(vol){
+  let total = 0; for (const x of vol) total += x;
+  if (total <= 0) return null;
+  let poc = 0; for (let i = 1; i < vol.length; i++) if (vol[i] > vol[poc]) poc = i;
+  const target = total * VA_PCT;
+  let captured = vol[poc], lo = poc, hi = poc, n = vol.length;
+  while (captured < target && (lo > 0 || hi < n - 1)){
+    const below = lo > 0 ? vol[lo - 1] : -1;
+    const above = hi < n - 1 ? vol[hi + 1] : -1;
+    if (above >= below) { hi++; captured += vol[hi]; }
+    else { lo--; captured += vol[lo]; }
+  }
+  return {poc, lo, hi};
+}
+
+function lvnBands(centers, vol, step){
+  let mx = 0; for (const x of vol) if (x > mx) mx = x;
+  if (mx <= 0) return [];
+  const thresh = mx * LVN_REL, bands = [];
+  let start = null;
+  for (let i = 1; i < vol.length - 1; i++){
+    if (vol[i] < thresh){ if (start === null) start = i; }
+    else if (start !== null){ bands.push([centers[start] - step/2, centers[i-1] + step/2]); start = null; }
+  }
+  if (start !== null) bands.push([centers[start] - step/2, centers[vol.length-2] + step/2]);
+  return bands;
+}
+
+// --- view state --------------------------------------------------------------
+let cur = {key:null, win:null, tf:"__DEFAULT_TF__"};
+let reveal = null;   // null => full static window; else number of candles shown
+let timer = null;
+
+function activeWin(){ return DATA[cur.key].windows[cur.win]; }
+function activeBars(){
+  const w = activeWin();
+  return w.tf[cur.tf] ? w.tf[cur.tf] : w.tf[Object.keys(w.tf)[0]];
+}
 
 function hline(y, color, width, dash){
   return {type:"line", xref:"paper", x0:0, x1:1, yref:"y", y0:y, y1:y,
           line:{color:color, width:width, dash:dash||"solid"}, layer:"above"};
 }
 
-function draw(key, tf){
-  const d = DATA[key];
-  const k = d.tf[tf] ? tf : Object.keys(d.tf)[0];
-  const bars = d.tf[k];
-  document.getElementById("meta").textContent = d.range + "  ·  " + k +
-      "  ·  POC " + d.poc + "  ·  VA " + d.val + "–" + d.vah +
-      "  ·  " + d.lvns.length + " LVN zones";
+function draw(){
+  const w = activeWin();
+  const bars = activeBars();
+  const n = bars.t.length;
+  const upTo = (reveal === null) ? n : Math.max(1, Math.min(reveal, n));
 
-  const candle = {type:"candlestick", x:bars.t, open:bars.o, high:bars.h,
-    low:bars.l, close:bars.c, xaxis:"x", yaxis:"y", name:"price",
+  const candle = {type:"candlestick",
+    x: bars.t.slice(0, upTo), open: bars.o.slice(0, upTo), high: bars.h.slice(0, upTo),
+    low: bars.l.slice(0, upTo), close: bars.c.slice(0, upTo),
+    xaxis:"x", yaxis:"y", name:"price",
     increasing:{line:{color:"#2da44e"}}, decreasing:{line:{color:"#cf222e"}}};
 
-  const colors = d.vp_price.map(p => (p>=d.val && p<=d.vah) ? "#1f6feb" : "#b1b8c0");
-  const vp = {type:"bar", orientation:"h", x:d.vp_vol, y:d.vp_price,
+  const pr = profileVol(bars, w.lo, w.hi, w.nbins, upTo);
+  const va = valueArea(pr.vol);
+  const bands = lvnBands(pr.centers, pr.vol, pr.step);
+
+  let poc, vah, val, inVA = () => false;
+  if (va){
+    poc = pr.centers[va.poc]; vah = pr.centers[va.hi]; val = pr.centers[va.lo];
+    inVA = (p) => p >= val && p <= vah;
+  }
+
+  const colors = pr.centers.map(p => inVA(p) ? "#1f6feb" : "#b1b8c0");
+  const vp = {type:"bar", orientation:"h", x:pr.vol, y:pr.centers,
     xaxis:"x2", yaxis:"y", marker:{color:colors}, opacity:0.85,
     name:"volume", hoverinfo:"skip"};
 
-  const shapes = [
-    {type:"rect", xref:"paper", x0:0, x1:1, yref:"y", y0:d.val, y1:d.vah,
-     fillcolor:"#1f6feb", opacity:0.06, line:{width:0}, layer:"below"},
-    hline(d.poc, POC, 2), hline(d.vah, POC, 1, "dash"), hline(d.val, POC, 1, "dash"),
-  ];
-  d.lvns.forEach(b => shapes.push(
+  const shapes = [], ann = [];
+  if (va){
+    shapes.push(
+      {type:"rect", xref:"paper", x0:0, x1:1, yref:"y", y0:val, y1:vah,
+       fillcolor:"#1f6feb", opacity:0.06, line:{width:0}, layer:"below"},
+      hline(poc, POC, 2), hline(vah, POC, 1, "dash"), hline(val, POC, 1, "dash"));
+    ann.push(
+      {xref:"paper", x:0.005, y:poc, yref:"y", text:"POC", showarrow:false,
+       font:{color:POC, size:11}, bgcolor:"#ffffff", xanchor:"left"},
+      {xref:"paper", x:0.005, y:vah, yref:"y", text:"VAH", showarrow:false,
+       font:{color:POC, size:10}, bgcolor:"#ffffff", xanchor:"left"},
+      {xref:"paper", x:0.005, y:val, yref:"y", text:"VAL", showarrow:false,
+       font:{color:POC, size:10}, bgcolor:"#ffffff", xanchor:"left"});
+  }
+  bands.forEach(b => shapes.push(
     {type:"rect", xref:"paper", x0:0, x1:1, yref:"y", y0:b[0], y1:b[1],
      fillcolor:LVN, opacity:0.13, line:{color:LVN, width:1, dash:"dot"}, layer:"below"}));
 
-  const ann = [
-    {xref:"paper", x:0.005, y:d.poc, yref:"y", text:"POC", showarrow:false,
-     font:{color:POC, size:11}, bgcolor:"#ffffff", xanchor:"left"},
-    {xref:"paper", x:0.005, y:d.vah, yref:"y", text:"VAH", showarrow:false,
-     font:{color:POC, size:10}, bgcolor:"#ffffff", xanchor:"left"},
-    {xref:"paper", x:0.005, y:d.val, yref:"y", text:"VAL", showarrow:false,
-     font:{color:POC, size:10}, bgcolor:"#ffffff", xanchor:"left"},
-  ];
+  const tag = (reveal === null) ? "full" : (upTo + "/" + n);
+  document.getElementById("meta").textContent =
+    w.label + "  ·  " + w.range + "  ·  " + cur.tf + "  ·  " + tag +
+    (va ? ("  ·  POC " + poc.toFixed(1) + "  ·  VA " + val.toFixed(1) + "–" + vah.toFixed(1)
+           + "  ·  " + bands.length + " LVN") : "");
 
   const layout = {
-    height: Math.max(420, Math.round(window.innerHeight * 0.78)),
+    height: Math.max(420, Math.round(window.innerHeight * 0.72)),
     margin: {l:48, r:8, t:8, b:28},
     paper_bgcolor:"#ffffff", plot_bgcolor:"#ffffff",
     font:{color:"#1f2328", size:11},
@@ -163,29 +276,96 @@ function draw(key, tf){
     {responsive:true, scrollZoom:true, displayModeBar:false});
 }
 
-const sel = document.getElementById("pick");
+// --- replay ------------------------------------------------------------------
+const scrub = document.getElementById("scrub");
+const playBtn = document.getElementById("play");
+
+function syncScrub(){
+  const n = activeBars().t.length;
+  scrub.max = n;
+  scrub.value = (reveal === null) ? n : Math.min(reveal, n);
+}
+
+function stop(){
+  if (timer){ clearInterval(timer); timer = null; }
+  playBtn.classList.remove("on"); playBtn.textContent = "▶";
+}
+
+function refresh(){ stop(); syncScrub(); draw(); }
+
+function step(){
+  const n = activeBars().t.length;
+  reveal = (reveal === null ? 1 : Math.min(reveal + 1, n));
+  scrub.value = reveal;
+  draw();
+  if (reveal >= n) stop();
+}
+
+function play(){
+  if (timer){ stop(); return; }
+  const n = activeBars().t.length;
+  if (reveal === null || reveal >= n) reveal = 1;   // (re)start from the open
+  playBtn.classList.add("on"); playBtn.textContent = "⏸";
+  const fps = +document.getElementById("speed").value;
+  timer = setInterval(step, Math.max(40, 1000 / fps));
+}
+
+playBtn.addEventListener("click", play);
+document.getElementById("step").addEventListener("click", () => { stop(); step(); });
+document.getElementById("reset").addEventListener("click", () => { stop(); reveal = null; syncScrub(); draw(); });
+scrub.addEventListener("input", () => { stop(); reveal = +scrub.value; draw(); });
+document.getElementById("speed").addEventListener("input", () => { if (timer){ const p = true; stop(); if (p) play(); } });
+
+// --- selectors ---------------------------------------------------------------
+const pick = document.getElementById("pick");
+const winSel = document.getElementById("win");
+const tfSel = document.getElementById("tf");
+
 Object.keys(DATA).forEach(k => {
   const o = document.createElement("option");
-  o.value = k; o.textContent = "MNQ " + k + "  (" + DATA[k].range + ")";
-  sel.appendChild(o);
+  o.value = k; o.textContent = "MNQ " + k;
+  pick.appendChild(o);
 });
 
-const tfSel = document.getElementById("tf");
-const anyTf = DATA[Object.keys(DATA)[0]].tf;
+const anyTf = (() => {
+  for (const k of Object.keys(DATA)){
+    const ws = DATA[k].windows;
+    const wk = Object.keys(ws)[0];
+    if (wk) return ws[wk].tf;
+  }
+  return {};
+})();
 Object.keys(anyTf).forEach(k => {
   const o = document.createElement("option");
   o.value = k; o.textContent = k;
   tfSel.appendChild(o);
 });
 
-function render(){ draw(sel.value, tfSel.value); }
-sel.addEventListener("change", render);
-tfSel.addEventListener("change", render);
-window.addEventListener("resize", render);
+function fillWindows(){
+  winSel.innerHTML = "";
+  const ws = DATA[cur.key].windows;
+  ["this", "last"].forEach(wk => {
+    if (!ws[wk]) return;
+    const o = document.createElement("option");
+    o.value = wk; o.textContent = ws[wk].label;
+    winSel.appendChild(o);
+  });
+  if (!ws[cur.win]) cur.win = winSel.options.length ? winSel.options[0].value : null;
+  winSel.value = cur.win;
+}
 
-sel.value = DATA["0626"] ? "0626" : Object.keys(DATA)[0];
-tfSel.value = "__DEFAULT_TF__";
-render();
+pick.addEventListener("change", () => {
+  cur.key = pick.value; reveal = null; fillWindows(); refresh();
+});
+winSel.addEventListener("change", () => { cur.win = winSel.value; reveal = null; refresh(); });
+tfSel.addEventListener("change", () => { cur.tf = tfSel.value; reveal = null; refresh(); });
+window.addEventListener("resize", draw);
+
+cur.key = Object.keys(DATA)[0];
+fillWindows();
+tfSel.value = DATA[cur.key].windows[cur.win].tf[cur.tf] ? cur.tf : Object.keys(anyTf)[0];
+cur.tf = tfSel.value;
+refresh();
 </script>
 </body>
 </html>
@@ -209,9 +389,21 @@ def main(argv):
     payload = {}
     for p in paths:
         d = contract_payload(p)
+        if not d["windows"]:
+            print(f"  {d['name']}: no usable week window — skipped")
+            continue
         payload[d["name"]] = d
-        print(f"  {d['name']}: {d['range']}  "
-              f"{len(d['tf'][DEFAULT_TF]['t'])} {DEFAULT_TF}-candles, {len(d['lvns'])} LVN")
+        oh = d["open_hour"]
+        print(f"  {d['name']}: session opens {oh:02d}:00  "
+              f"({'~ET' if oh == 18 else '~CT' if oh == 17 else 'detected'})")
+        for wk in ("this", "last"):
+            w = d["windows"].get(wk)
+            if w:
+                print(f"      {w['label']:22s} {w['range']}  "
+                      f"({len(w['tf'][DEFAULT_TF]['t'])} {DEFAULT_TF}-candles)")
+    if not payload:
+        print("no contracts with usable week windows — nothing written")
+        return
     html = (TEMPLATE
             .replace("__PLOTLY_JS__", plotly_script())
             .replace("__DEFAULT_TF__", DEFAULT_TF)
