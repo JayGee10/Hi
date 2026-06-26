@@ -1,7 +1,9 @@
 """Backtest: how does price test Session Volume Profile levels?
 
-For each timeframe (daily, weekly) we take the *prior* session's profile levels
-(POC, VAH, VAL) and measure how price interacts with them in the *next* session:
+Sessions are the real CME trading sessions in Eastern time (see sessions.py),
+not calendar days. For each session we take the *previous* session's profile
+levels (POC, VAH, VAL) and measure how price interacts with them in the *next*
+session:
 
   - touch     : price trades into the level
   - hold      : level rejects price (acts as support/resistance)
@@ -12,7 +14,7 @@ We also measure the "confluence edge": do daily levels hold more often when a
 weekly level sits right on top of them?
 
 Run:  python backtest.py                  # synthetic data
-      python backtest.py data.csv         # one intraday OHLCV file
+      python backtest.py data.txt         # one intraday OHLCV file (UTC stamps)
       python backtest.py a.txt b.txt ...  # many files, pooled COMBINED summary
 """
 
@@ -25,15 +27,18 @@ import numpy as np
 import pandas as pd
 
 import data as data_mod
-from volume_profile import Profile, build_profiles
+import sessions
+from volume_profile import Profile, build_session_profiles
 
 
 # --- tunable test parameters -------------------------------------------------
+SESSION = "RTH"      # "RTH" (09:30-16:00 ET cash session) or "ETH" (full Globex)
 BREAK_ATR = 0.5      # close this far past a level (in ATR) => break/acceptance
 REACTION_ATR = 0.5   # move this far back off a level (in ATR) => hold/rejection
 CONFLUENCE_ATR = 0.25  # daily & weekly level within this distance => confluence
-# How long a touch has to resolve, in MINUTES (auto-scaled to the file's bar size).
-LOOKAHEAD_MIN = {"daily": 480, "weekly": 1440}
+# How long a touch has to resolve, in MINUTES (auto-scaled to the file's bar
+# size). Daily ~= one RTH session (390 min); weekly ~= a few sessions.
+LOOKAHEAD_MIN = {"daily": 390, "weekly": 1440}
 
 
 @dataclass
@@ -55,19 +60,24 @@ def bar_minutes(bars: pd.DataFrame) -> float:
     return max(1.0, float(intraday.median()) / 60.0)
 
 
-def daily_atr(bars: pd.DataFrame, n: int = 14) -> pd.Series:
-    """ATR(n) on daily bars, indexed by date (normalized to midnight)."""
-    d = bars.resample("D").agg(
-        high=("high", "max"), low=("low", "min"), close=("close", "last")
-    ).dropna()
-    prev_close = d["close"].shift(1)
+def session_atr(bars_et: pd.DataFrame, session: str, n: int = 14) -> pd.Series:
+    """ATR(n) computed on per-session daily bars, indexed by session key."""
+    groups = sessions.session_groups(bars_et, session, "D")
+    if not groups:
+        return pd.Series(dtype=float)
+    keys = sorted(groups)
+    df = pd.DataFrame({
+        "high": {k: groups[k]["high"].max() for k in keys},
+        "low": {k: groups[k]["low"].min() for k in keys},
+        "close": {k: groups[k]["close"].iloc[-1] for k in keys},
+    }).sort_index()
+    prev_close = df["close"].shift(1)
     tr = pd.concat(
-        [d["high"] - d["low"], (d["high"] - prev_close).abs(), (d["low"] - prev_close).abs()],
+        [df["high"] - df["low"], (df["high"] - prev_close).abs(),
+         (df["low"] - prev_close).abs()],
         axis=1,
     ).max(axis=1)
-    atr = tr.rolling(n, min_periods=1).mean()
-    atr.index = atr.index.normalize()
-    return atr
+    return tr.rolling(n, min_periods=1).mean()
 
 
 def _resolve_touch(
@@ -98,35 +108,36 @@ def _confluent(level: float, weekly: Profile | None, atr: float) -> bool:
 
 
 def test_timeframe(
-    bars: pd.DataFrame,
     profiles: list[Profile],
+    groups: dict,
     timeframe: str,
     atr: pd.Series,
     bar_min: float,
     weekly_lookup: dict | None = None,
 ) -> list[TestResult]:
-    """Test each session's price action against the *previous* session's levels."""
+    """Test each session's price action against the *previous* session's levels.
+
+    `profiles` and `groups` share the same session keys; `groups[key]` holds the
+    bars of that session.
+    """
     results: list[TestResult] = []
     look = max(1, round(LOOKAHEAD_MIN[timeframe] / bar_min))
-    rule = "D" if timeframe == "daily" else "W"
-    sessions = {s: g for s, g in bars.groupby(pd.Grouper(freq=rule))}
-    session_keys = sorted(sessions.keys())
+    session_keys = sorted(groups)
+    med_atr = float(atr.median()) if len(atr) else 0.0
 
     for prev in profiles:
-        # find the session immediately after the one this profile was built on
         later = [s for s in session_keys if s > prev.session]
         if not later:
             continue
         cur_key = later[0]
-        cur = sessions[cur_key]
+        cur = groups[cur_key]
         if cur.empty:
             continue
 
-        a = float(atr.get(cur_key.normalize(), atr.median()))
-        if a <= 0:
-            a = atr.median()
+        a = float(atr.get(cur_key, med_atr))
+        if not np.isfinite(a) or a <= 0:
+            a = med_atr or 1.0
 
-        # active weekly profile for confluence (most recent weekly before cur)
         weekly = None
         if weekly_lookup is not None:
             wk = [w for w in sorted(weekly_lookup) if w < cur_key]
@@ -134,12 +145,11 @@ def test_timeframe(
                 weekly = weekly_lookup[wk[-1]]
 
         for name, level in (("POC", prev.poc), ("VAH", prev.vah), ("VAL", prev.val)):
-            # first bar that trades into the level
             touched = cur[(cur["low"] <= level) & (cur["high"] >= level)]
             if touched.empty:
                 continue
-            t_idx = cur.index.get_loc(touched.index[0])
-            pos = t_idx if isinstance(t_idx, int) else t_idx.start
+            pos = cur.index.get_loc(touched.index[0])
+            pos = pos if isinstance(pos, int) else pos.start
             pre_close = cur["close"].iloc[pos - 1] if pos > 0 else cur["open"].iloc[pos]
             from_below = pre_close < level
             fwd = cur.iloc[pos + 1: pos + 1 + look]
@@ -154,7 +164,7 @@ def test_timeframe(
 def summarize(results: list[TestResult], timeframe: str) -> None:
     rows = [r for r in results if r.timeframe == timeframe]
     resolved = [r for r in rows if r.outcome in ("hold", "break")]
-    print(f"\n=== {timeframe.upper()} session VP — level tests ===")
+    print(f"\n=== {timeframe.upper()} {SESSION} session VP — level tests ===")
     print(f"touches: {len(rows)}   resolved: {len(resolved)}   "
           f"unresolved: {len(rows) - len(resolved)}")
     if resolved:
@@ -185,19 +195,21 @@ def summarize_confluence(results: list[TestResult]) -> None:
         print(f"  edge from confluence    : {edge:+.1%}")
 
 
-def run_one(bars: pd.DataFrame) -> list[TestResult]:
-    """Build profiles and run daily + weekly level tests for one dataset."""
-    atr = daily_atr(bars)
-    bar_min = bar_minutes(bars)
-    daily_profiles = build_profiles(bars, "D")
-    weekly_profiles = build_profiles(bars, "W")
+def run_one(bars_et: pd.DataFrame) -> list[TestResult]:
+    """Build RTH session profiles and run daily + weekly level tests."""
+    bar_min = bar_minutes(bars_et)
+    atr = session_atr(bars_et, SESSION)
+    daily_profiles = build_session_profiles(bars_et, SESSION, "D")
+    weekly_profiles = build_session_profiles(bars_et, SESSION, "W")
     weekly_lookup = {p.session: p for p in weekly_profiles}
-    print(f"built {len(daily_profiles)} daily and {len(weekly_profiles)} weekly profiles "
-          f"({bar_min:.0f}-min bars)")
+    dgroups = sessions.session_groups(bars_et, SESSION, "D")
+    wgroups = sessions.session_groups(bars_et, SESSION, "W")
+    print(f"built {len(daily_profiles)} {SESSION} daily and {len(weekly_profiles)} "
+          f"weekly sessions ({bar_min:.0f}-min bars)")
 
     results: list[TestResult] = []
-    results += test_timeframe(bars, daily_profiles, "daily", atr, bar_min, weekly_lookup)
-    results += test_timeframe(bars, weekly_profiles, "weekly", atr, bar_min)
+    results += test_timeframe(daily_profiles, dgroups, "daily", atr, bar_min, weekly_lookup)
+    results += test_timeframe(weekly_profiles, wgroups, "weekly", atr, bar_min)
     return results
 
 
@@ -211,18 +223,18 @@ def main(argv: list[str]) -> None:
     paths = argv[1:]
     if not paths:
         print("no CSV given — using synthetic intraday data")
-        bars = data_mod.synthetic()
-        print(f"{len(bars):,} bars  {bars.index[0]} -> {bars.index[-1]}")
-        report(run_one(bars))
+        bars_et = sessions.assume_eastern(data_mod.synthetic())
+        print(f"{len(bars_et):,} bars  {bars_et.index[0]} -> {bars_et.index[-1]}")
+        report(run_one(bars_et))
         return
 
     pooled: list[TestResult] = []
     for path in paths:
         name = path.split("/")[-1]
         print(f"\n############## {name} ##############")
-        bars = data_mod.load_csv(path)
-        print(f"{len(bars):,} bars  {bars.index[0]} -> {bars.index[-1]}")
-        results = run_one(bars)
+        bars_et = sessions.to_eastern(data_mod.load_csv(path), "UTC")
+        print(f"{len(bars_et):,} bars  {bars_et.index[0]} -> {bars_et.index[-1]} (ET)")
+        results = run_one(bars_et)
         report(results)
         pooled += results
 
