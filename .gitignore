@@ -4,3 +4,7 @@ __pycache__/
 venv/
 *.csv
 !sample*.csv
+# generated artifacts and raw data exports
+*.png
+*.html
+*.Last.txt
