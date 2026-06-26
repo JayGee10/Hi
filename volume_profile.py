@@ -31,22 +31,12 @@ def _bin_edges(low: float, high: float, n_bins: int) -> np.ndarray:
     return np.linspace(low, high, n_bins + 1)
 
 
-def session_profile(
-    bars: pd.DataFrame,
-    n_bins: int = 50,
-    value_area_pct: float = 0.70,
-) -> Profile | None:
-    """Compute a volume profile for a single session's intraday bars.
+def profile_arrays(bars: pd.DataFrame, n_bins: int = 50):
+    """Return (centers, vol_at_price) for the volume-at-price histogram.
 
     Each bar's volume is spread uniformly across the price bins its high-low
-    range overlaps. This is the standard approximation when tick data isn't
-    available.
-
-    `bars` must have columns: high, low, volume (and a DatetimeIndex).
+    range overlaps (the standard approximation when tick data isn't available).
     """
-    if bars.empty:
-        return None
-
     s_low = float(bars["low"].min())
     s_high = float(bars["high"].max())
     edges = _bin_edges(s_low, s_high, n_bins)
@@ -56,13 +46,59 @@ def session_profile(
     for high, low, vol in zip(bars["high"].values, bars["low"].values, bars["volume"].values):
         if vol <= 0:
             continue
-        # bins the bar's range overlaps
         lo_idx = np.searchsorted(edges, low, side="right") - 1
         hi_idx = np.searchsorted(edges, high, side="right") - 1
         lo_idx = max(0, min(lo_idx, n_bins - 1))
         hi_idx = max(0, min(hi_idx, n_bins - 1))
         span = hi_idx - lo_idx + 1
         vol_at_price[lo_idx:hi_idx + 1] += vol / span
+
+    return centers, vol_at_price
+
+
+def low_volume_nodes(
+    centers: np.ndarray,
+    vol: np.ndarray,
+    rel_threshold: float = 0.30,
+) -> list[tuple[float, float]]:
+    """Find Low-Volume Node price bands (thin zones price tends to move through).
+
+    A bin is "low volume" if it holds less than `rel_threshold` of the POC bin's
+    volume. Adjacent low-volume bins are merged into bands and returned as
+    (low_price, high_price) pairs. The traded extremes are excluded (a profile
+    always tapers to zero at its edges).
+    """
+    if vol.max() <= 0:
+        return []
+    step = float(centers[1] - centers[0]) if len(centers) > 1 else 0.0
+    thresh = vol.max() * rel_threshold
+    bands: list[tuple[float, float]] = []
+    start = None
+    for i in range(1, len(vol) - 1):  # skip the two outer edge bins
+        if vol[i] < thresh:
+            if start is None:
+                start = i
+        elif start is not None:
+            bands.append((centers[start] - step / 2, centers[i - 1] + step / 2))
+            start = None
+    if start is not None:
+        bands.append((centers[start] - step / 2, centers[len(vol) - 2] + step / 2))
+    return bands
+
+
+def session_profile(
+    bars: pd.DataFrame,
+    n_bins: int = 50,
+    value_area_pct: float = 0.70,
+) -> Profile | None:
+    """Compute a volume profile for a single session's intraday bars.
+
+    `bars` must have columns: high, low, volume (and a DatetimeIndex).
+    """
+    if bars.empty:
+        return None
+
+    centers, vol_at_price = profile_arrays(bars, n_bins)
 
     total = vol_at_price.sum()
     if total <= 0:
@@ -90,8 +126,8 @@ def session_profile(
         poc=poc,
         vah=float(centers[hi]),
         val=float(centers[lo]),
-        high=s_high,
-        low=s_low,
+        high=float(bars["high"].max()),
+        low=float(bars["low"].min()),
         total_volume=float(total),
     )
 
