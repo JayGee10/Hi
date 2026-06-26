@@ -112,6 +112,17 @@ __PLOTLY_JS__
   .sw { display:inline-block; width:10px; height:10px; border-radius:2px;
         margin: 0 4px 0 10px; vertical-align: middle; }
   #chart { width: 100%; }
+  #wrap { position: relative; touch-action: none; }
+  .cxline { position:absolute; pointer-events:none; display:none; z-index:4; }
+  .cxline.v { border-left:1px dashed #6e7781; width:0; }
+  .cxline.h { border-top:1px dashed #6e7781; height:0; }
+  .cxtag { position:absolute; pointer-events:none; display:none; z-index:5;
+           background:#1f2328; color:#fff; padding:1px 5px; border-radius:3px;
+           font-size:11px; white-space:nowrap; }
+  .cxinfo { position:absolute; top:6px; left:54px; pointer-events:none; display:none;
+            z-index:5; background:rgba(255,255,255,.92); border:1px solid #d0d7de;
+            border-radius:6px; padding:4px 7px; font-size:11px; line-height:1.5;
+            color:#1f2328; }
 </style>
 </head>
 <body>
@@ -137,7 +148,14 @@ __PLOTLY_JS__
   <span class="sw" style="background:#2da44e"></span>up
   <span class="sw" style="background:#cf222e"></span>down
 </div>
-<div id="chart"></div>
+<div id="wrap">
+  <div id="chart"></div>
+  <div id="cxv" class="cxline v"></div>
+  <div id="cxh" class="cxline h"></div>
+  <div id="cxprice" class="cxtag"></div>
+  <div id="cxtime" class="cxtag"></div>
+  <div id="cxinfo" class="cxinfo"></div>
+</div>
 <script>
 const DATA = __DATA__;
 const POC="#1f6feb", LVN="#d1242f";
@@ -195,6 +213,7 @@ function lvnBands(centers, vol, step){
 let cur = {key:null, win:null, tf:"__DEFAULT_TF__"};
 let reveal = null;   // null => full static window; else number of candles shown
 let timer = null;
+let LEVELS = null;   // current POC/VAH/VAL, for the crosshair readout
 
 function activeWin(){ return DATA[cur.key].windows[cur.win]; }
 function activeBars(){
@@ -228,6 +247,7 @@ function draw(){
     poc = pr.centers[va.poc]; vah = pr.centers[va.hi]; val = pr.centers[va.lo];
     inVA = (p) => p >= val && p <= vah;
   }
+  LEVELS = va ? {poc:poc, vah:vah, val:val} : null;
 
   const colors = pr.centers.map(p => inVA(p) ? "#1f6feb" : "#b1b8c0");
   const vp = {type:"bar", orientation:"h", x:pr.vol, y:pr.centers,
@@ -265,10 +285,10 @@ function draw(){
     font:{color:"#1f2328", size:11},
     showlegend:false, dragmode:"pan",
     xaxis:{domain:[0,0.80], type:"date", rangeslider:{visible:false},
-           gridcolor:"#e1e4e8", showspikes:true, spikethickness:1},
+           gridcolor:"#e1e4e8", showspikes:false, spikethickness:1},
     xaxis2:{domain:[0.82,1.0], anchor:"y", showgrid:false, zeroline:false,
             showticklabels:false},
-    yaxis:{anchor:"x", side:"left", gridcolor:"#e1e4e8", showspikes:true,
+    yaxis:{anchor:"x", side:"left", gridcolor:"#e1e4e8", showspikes:false,
            spikethickness:1, tickformat:","},
     shapes:shapes, annotations:ann,
   };
@@ -360,6 +380,60 @@ pick.addEventListener("change", () => {
 winSel.addEventListener("change", () => { cur.win = winSel.value; reveal = null; refresh(); });
 tfSel.addEventListener("change", () => { cur.tf = tfSel.value; reveal = null; refresh(); });
 window.addEventListener("resize", draw);
+
+// --- crosshair cursor (free-floating, with price/time + level readout) -------
+const cxv = document.getElementById("cxv"), cxh = document.getElementById("cxh");
+const cxprice = document.getElementById("cxprice"), cxtime = document.getElementById("cxtime");
+const cxinfo = document.getElementById("cxinfo");
+
+function fmtP(v){ return v.toLocaleString(undefined, {maximumFractionDigits:0}); }
+function fmtT(ms){
+  const d = new Date(ms), p = n => String(n).padStart(2, "0");
+  return p(d.getMonth()+1) + "/" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes());
+}
+function hideCross(){ [cxv, cxh, cxprice, cxtime, cxinfo].forEach(e => e.style.display = "none"); }
+
+function moveCross(evt){
+  const gd = document.getElementById("chart");
+  const fl = gd && gd._fullLayout;
+  if (!fl || !fl.xaxis || !fl.yaxis){ hideCross(); return; }
+  const xa = fl.xaxis, ya = fl.yaxis, xa2 = fl.xaxis2;
+  const rect = gd.getBoundingClientRect();
+  const gx = evt.clientX - rect.left, gy = evt.clientY - rect.top;
+  const xL = xa._offset, xR = xa._offset + xa._length;
+  const yT = ya._offset, yB = ya._offset + ya._length;
+  if (gx < xL || gx > xR || gy < yT || gy > yB){ hideCross(); return; }
+
+  const xl0 = xa.r2l(xa.range[0]), xl1 = xa.r2l(xa.range[1]);
+  const tms = xl0 + (gx - xL) / (xR - xL) * (xl1 - xl0);
+  const yl0 = ya.r2l(ya.range[0]), yl1 = ya.r2l(ya.range[1]);
+  const price = yl0 + (gy - yB) / (yT - yB) * (yl1 - yl0);
+  const fullR = xa2 ? (xa2._offset + xa2._length) : xR;   // span the VP panel too
+
+  cxv.style.display = "block"; cxv.style.left = gx + "px"; cxv.style.top = yT + "px";
+  cxv.style.height = (yB - yT) + "px";
+  cxh.style.display = "block"; cxh.style.top = gy + "px"; cxh.style.left = xL + "px";
+  cxh.style.width = (fullR - xL) + "px";
+
+  cxprice.style.display = "block"; cxprice.textContent = fmtP(price);
+  cxprice.style.left = (xL - 2) + "px"; cxprice.style.top = (gy - 9) + "px";
+  cxprice.style.transform = "translateX(-100%)";
+
+  cxtime.style.display = "block"; cxtime.textContent = fmtT(tms);
+  cxtime.style.left = gx + "px"; cxtime.style.top = (yB + 3) + "px";
+  cxtime.style.transform = "translateX(-50%)";
+
+  const sgn = v => (v >= 0 ? "+" : "") + v.toFixed(1);
+  cxinfo.style.display = "block";
+  cxinfo.innerHTML = "<b>" + fmtP(price) + "</b> @ " + fmtT(tms) + (LEVELS ?
+    ("<br>POC " + sgn(price - LEVELS.poc) + " · VAH " + sgn(price - LEVELS.vah) +
+     " · VAL " + sgn(price - LEVELS.val)) : "");
+}
+
+const chartEl = document.getElementById("chart");
+chartEl.addEventListener("pointermove", moveCross);
+chartEl.addEventListener("pointerdown", moveCross);
+chartEl.addEventListener("pointerleave", hideCross);
 
 cur.key = Object.keys(DATA)[0];
 fillWindows();
