@@ -58,18 +58,18 @@ TEMPLATE = """<!DOCTYPE html>
 <title>MNQ Session Volume Profile</title>
 __PLOTLY_JS__
 <style>
-  :root { color-scheme: dark; }
+  :root { color-scheme: light; }
   * { box-sizing: border-box; }
-  body { margin: 0; background: #0d1117; color: #e6edf3;
+  body { margin: 0; background: #ffffff; color: #1f2328;
          font-family: -apple-system, system-ui, sans-serif; }
-  header { padding: 10px 12px; position: sticky; top: 0; background: #0d1117;
-           border-bottom: 1px solid #21262d; z-index: 5; }
+  header { padding: 10px 12px; position: sticky; top: 0; background: #ffffff;
+           border-bottom: 1px solid #d0d7de; z-index: 5; }
   h1 { font-size: 16px; margin: 0 0 8px; }
   .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  select { background: #161b22; color: #e6edf3; border: 1px solid #30363d;
+  select { background: #ffffff; color: #1f2328; border: 1px solid #d0d7de;
            border-radius: 8px; padding: 8px 10px; font-size: 15px; flex: 1; }
-  .meta { font-size: 12px; color: #8b949e; }
-  .legend { font-size: 11px; color: #8b949e; padding: 6px 12px; }
+  .meta { font-size: 12px; color: #57606a; }
+  .legend { font-size: 11px; color: #57606a; padding: 6px 12px; }
   .sw { display:inline-block; width:10px; height:10px; border-radius:2px;
         margin: 0 4px 0 10px; vertical-align: middle; }
   #chart { width: 100%; }
@@ -108,7 +108,7 @@ function draw(key){
     xaxis:"x", yaxis:"y", name:"price",
     increasing:{line:{color:"#2da44e"}}, decreasing:{line:{color:"#cf222e"}}};
 
-  const colors = d.vp_price.map(p => (p>=d.val && p<=d.vah) ? "#1f6feb" : "#6e7681");
+  const colors = d.vp_price.map(p => (p>=d.val && p<=d.vah) ? "#1f6feb" : "#b1b8c0");
   const vp = {type:"bar", orientation:"h", x:d.vp_vol, y:d.vp_price,
     xaxis:"x2", yaxis:"y", marker:{color:colors}, opacity:0.85,
     name:"volume", hoverinfo:"skip"};
@@ -124,24 +124,24 @@ function draw(key){
 
   const ann = [
     {xref:"paper", x:0.005, y:d.poc, yref:"y", text:"POC", showarrow:false,
-     font:{color:POC, size:11}, bgcolor:"#0d1117", xanchor:"left"},
+     font:{color:POC, size:11}, bgcolor:"#ffffff", xanchor:"left"},
     {xref:"paper", x:0.005, y:d.vah, yref:"y", text:"VAH", showarrow:false,
-     font:{color:POC, size:10}, bgcolor:"#0d1117", xanchor:"left"},
+     font:{color:POC, size:10}, bgcolor:"#ffffff", xanchor:"left"},
     {xref:"paper", x:0.005, y:d.val, yref:"y", text:"VAL", showarrow:false,
-     font:{color:POC, size:10}, bgcolor:"#0d1117", xanchor:"left"},
+     font:{color:POC, size:10}, bgcolor:"#ffffff", xanchor:"left"},
   ];
 
   const layout = {
     height: Math.max(420, Math.round(window.innerHeight * 0.78)),
     margin: {l:48, r:8, t:8, b:28},
-    paper_bgcolor:"#0d1117", plot_bgcolor:"#0d1117",
-    font:{color:"#e6edf3", size:11},
+    paper_bgcolor:"#ffffff", plot_bgcolor:"#ffffff",
+    font:{color:"#1f2328", size:11},
     showlegend:false, dragmode:"pan",
     xaxis:{domain:[0,0.80], type:"date", rangeslider:{visible:false},
-           gridcolor:"#21262d", showspikes:true, spikethickness:1},
+           gridcolor:"#e1e4e8", showspikes:true, spikethickness:1},
     xaxis2:{domain:[0.82,1.0], anchor:"y", showgrid:false, zeroline:false,
             showticklabels:false},
-    yaxis:{anchor:"x", side:"left", gridcolor:"#21262d", showspikes:true,
+    yaxis:{anchor:"x", side:"left", gridcolor:"#e1e4e8", showspikes:true,
            spikethickness:1, tickformat:","},
     shapes:shapes, annotations:ann,
   };
