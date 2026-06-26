@@ -694,18 +694,31 @@ refresh();
 """
 
 
-def plotly_script() -> str:
-    """Inline the bundled Plotly JS for a fully offline file; fall back to CDN."""
+CDN_TAG = '<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>'
+
+
+def plotly_script(cdn: bool = False) -> str:
+    """Plotly JS for the page.
+
+    Default inlines the bundled library for a fully offline file (~4.8 MB). Pass
+    ``cdn=True`` for a much smaller page (~1 MB) that loads Plotly from the CDN
+    the first time it opens — better for downloading/opening on a phone.
+    """
+    if cdn:
+        return CDN_TAG
     try:
         import plotly
         import pathlib
         js = next(pathlib.Path(plotly.__file__).parent.rglob("plotly*.min.js"))
         return "<script>" + js.read_text() + "</script>"
     except Exception:
-        return '<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>'
+        return CDN_TAG
 
 
 def main(argv):
+    argv = list(argv)
+    cdn = "--cdn" in argv
+    argv = [a for a in argv if a != "--cdn"]
     out = argv[1]
     paths = argv[2:]
     payload = {}
@@ -731,7 +744,7 @@ def main(argv):
         print("no contracts with usable sessions — nothing written")
         return
     html = (TEMPLATE
-            .replace("__PLOTLY_JS__", plotly_script())
+            .replace("__PLOTLY_JS__", plotly_script(cdn))
             .replace("__DEFAULT_TF__", DEFAULT_TF)
             .replace("__DAILY_DEFAULT_TF__", DAILY_DEFAULT_TF)
             .replace("__DATA__", json.dumps(payload)))
