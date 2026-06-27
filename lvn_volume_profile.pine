@@ -12,15 +12,21 @@
 //                     LVNs and carries forward any earlier-in-the-week daily
 //                     LVNs that have not yet been mitigated.
 //
-// Session handling: NOTHING about RTH/ETH is hardcoded. We simply profile the
-// chart's bars as they are. Day/week boundaries are detected from the chart's
-// own session (`time("D")`) and the calendar (`dayofweek`). On CME futures the
-// session opens at 18:00 ET (6pm EST), so the per-day profiles end up anchored
-// to that 6pm open automatically.
+// The profile is drawn like TradingView's native Session Volume Profile:
+// horizontal UP/DOWN bars anchored at the session OPEN on the LEFT, extending
+// RIGHT across the session, with a POC line. LVN boxes mark the interior
+// low-volume pinch points (the natural taper at the very top/bottom is ignored).
+//
+// Session handling: NOTHING about RTH/ETH is hardcoded. We profile the chart's
+// bars as-is. Day/week boundaries come from the chart's own session (time("D"),
+// which on CME futures rolls at the 18:00 ET / 6pm EST open) and dayofweek.
 //
 // There is no built-in fixed-range VP exposed to indicators, so the profile is
 // computed manually (see buildProfile()): split the price span into N equal
 // rows and spread each bar's volume across the rows its high-low overlaps.
+//
+// NOTE: best on intraday futures at 3m-15m. On 1m a week spans more bars than
+// the look-back cap, so use a higher timeframe for the weekly track.
 // =============================================================================
 indicator("Unmitigated LVN Volume Profile", overlay = true,
      max_boxes_count = 500, max_lines_count = 500, max_polylines_count = 100,
@@ -33,16 +39,20 @@ gProfile = "Profile"
 rowsPerProfile = input.int(100, "Rows per profile", minval = 5, maxval = 500,
      group = gProfile,
      tooltip = "Number of equal-height price buckets each profile is split into.")
+profileWidthBars = input.int(40, "Profile width (bars)", minval = 4,
+     group = gProfile,
+     tooltip = "Horizontal length (in bars) of the widest row, drawn to the " +
+     "RIGHT of the session-open anchor. LVN boxes span this width too.")
+
+gLvn = "LVN detection"
 lvnCutoff = input.float(0.125, "LVN cutoff (normalized width)", minval = 0.0,
-     maxval = 1.0, step = 0.005, group = gProfile,
+     maxval = 1.0, step = 0.005, group = gLvn,
      tooltip = "A row is a Low Volume Node when its volume, normalized so the " +
      "fattest row = 1.0, is BELOW this value. Default 0.125 = bottom ~12.5%.")
-
-gGeom = "Geometry"
-boxWidthBars = input.int(20, "Profile/box width (bars)", minval = 2,
-     group = gGeom,
-     tooltip = "Horizontal extent of the profile, in bars, drawn to the LEFT " +
-     "of the session-open anchor line. LVN boxes span this full width.")
+edgeRowsToIgnore = input.int(3, "Ignore edge rows", minval = 0, group = gLvn,
+     tooltip = "Skip this many rows at the top AND bottom of each profile so " +
+     "the natural volume taper at the extremes is not flagged - only INTERIOR " +
+     "low-volume pinch points become LVN zones.")
 
 gMit = "Mitigation"
 candlesToMitigate = input.int(4, "Candles to mitigate", minval = 1, group = gMit,
@@ -58,7 +68,15 @@ mitigatedStyleDelete = input.bool(true, "Mitigated style: delete (off = grey)",
 greyColor = input.color(color.new(color.gray, 35), "Mitigated grey color",
      group = gMit)
 
-gColor = "Colors"
+gHist = "Histogram"
+showHistogram = input.bool(true, "Draw volume profile", group = gHist)
+showPOC = input.bool(true, "Draw POC line", group = gHist)
+upColor = input.color(color.new(#26C6DA, 30), "Up (buy) volume", group = gHist)
+downColor = input.color(color.new(#EC407A, 30), "Down (sell) volume",
+     group = gHist)
+pocColor = input.color(color.new(color.white, 0), "POC", group = gHist)
+
+gColor = "LVN box colors"
 weeklyColor = input.color(color.new(color.orange, 0), "Weekly LVN color",
      group = gColor)
 // Pine has no color-array input, so the per-weekday palette is one input per day
@@ -67,8 +85,8 @@ cSun = input.color(color.new(#7E57C2, 0), "Sunday LVN",    group = gColor)
 cMon = input.color(color.new(#26A69A, 0), "Monday LVN",    group = gColor)
 cTue = input.color(color.new(#42A5F5, 0), "Tuesday LVN",   group = gColor)
 cWed = input.color(color.new(#FFCA28, 0), "Wednesday LVN", group = gColor)
-cThu = input.color(color.new(#EF5350, 0), "Thursday LVN",  group = gColor)
-cFri = input.color(color.new(#EC407A, 0), "Friday LVN",    group = gColor)
+cThu = input.color(color.new(#AB47BC, 0), "Thursday LVN",  group = gColor)
+cFri = input.color(color.new(#66BB6A, 0), "Friday LVN",    group = gColor)
 cSat = input.color(color.new(#8D6E63, 0), "Saturday LVN",  group = gColor)
 weekdayPalette = array.from(cSun, cMon, cTue, cWed, cThu, cFri, cSat)
 
@@ -76,10 +94,8 @@ gHk = "Housekeeping"
 maxLookback = input.int(20, "Max lookback (profiles to keep / track)",
      minval = 1, group = gHk,
      tooltip = "Keep at most this many daily profiles AND this many weekly " +
-     "profiles. Oldest are pruned (boxes deleted) so the 500-object cap is " +
+     "profiles. Oldest are pruned (drawings deleted) so the object caps are " +
      "never reached.")
-showHistogram = input.bool(true, "Draw full histogram", group = gHk)
-showAnchorLine = input.bool(true, "Draw anchor line", group = gHk)
 
 // =============================================================================
 // TYPES
@@ -95,12 +111,13 @@ type LvnZone
     color colr         // active color (weekday palette or weekly color)
     box   bx           // the drawn box (na once deleted)
 
-// Per-profile visuals (histogram + anchor line), tracked so they can be pruned
-// together with their LVN boxes.
+// Per-profile visuals (up/down histogram polylines + POC line), tracked so they
+// can be pruned together with their LVN boxes.
 type ProfileViz
     bool     isWeekly
-    line     anchorLn
-    polyline hist
+    polyline up
+    polyline dn
+    line     poc
 
 // =============================================================================
 // STATE (persists across bars)
@@ -119,15 +136,19 @@ var int weekOpenBar = bar_index   // bar_index of the current week's open
 // PROFILE BUILDER  (manual fixed-range volume profile - two passes)
 // -----------------------------------------------------------------------------
 // Given a range of `n` bars ending on the PREVIOUS bar (offsets 1..n), build the
-// per-row volume array. Mirrors volume_profile.py::profile_arrays.
+// per-row volume arrays. Mirrors volume_profile.py::profile_arrays, but also
+// splits each bar's volume into UP (close >= open) and DOWN (close < open) so the
+// profile can be colored like a buy/sell volume profile.
 //   Pass 1: find the range high/low -> equal-height rows.
 //   Pass 2: spread each bar's volume EVENLY across every row its high-low spans
 //           (the standard approximation when tick data is unavailable).
-// Returns the row-volume array; rangeLow / rowHeight are returned via the tuple.
+// Returns: total / up / down row arrays, plus rangeLow and rowHeight.
 // =============================================================================
 buildProfile(int n) =>
     rows = rowsPerProfile
     rowVols = array.new_float(rows, 0.0)
+    rowUp   = array.new_float(rows, 0.0)
+    rowDn   = array.new_float(rows, 0.0)
     float rangeLow  = na
     float rangeHigh = na
     // Cap the look-back at max_bars_back so historical references never error
@@ -135,26 +156,27 @@ buildProfile(int n) =>
     nClamped = math.min(n, 4999)
     // --- Pass 1: extremes across the whole range ---
     for i = 1 to nClamped
-        h = high[i]
-        l = low[i]
-        rangeHigh := na(rangeHigh) ? h : math.max(rangeHigh, h)
-        rangeLow  := na(rangeLow)  ? l : math.min(rangeLow,  l)
+        rangeHigh := na(rangeHigh) ? high[i] : math.max(rangeHigh, high[i])
+        rangeLow  := na(rangeLow)  ? low[i]  : math.min(rangeLow,  low[i])
     rowHeight = (rangeHigh - rangeLow) / rows
-    // --- Pass 2: distribute volume into rows ---
+    // --- Pass 2: distribute volume into rows (even split across spanned rows) ---
     if rowHeight > 0
         for i = 1 to nClamped
             v = volume[i]
             if v > 0
                 // Row index of this bar's low and high, clamped into [0, rows-1].
-                loIdx = math.floor((low[i]  - rangeLow) / rowHeight)
-                hiIdx = math.floor((high[i] - rangeLow) / rowHeight)
-                loIdx := math.max(0, math.min(loIdx, rows - 1))
-                hiIdx := math.max(0, math.min(hiIdx, rows - 1))
+                loIdx = math.max(0, math.min(math.floor((low[i]  - rangeLow) / rowHeight), rows - 1))
+                hiIdx = math.max(0, math.min(math.floor((high[i] - rangeLow) / rowHeight), rows - 1))
                 span = hiIdx - loIdx + 1
                 share = v / span                 // even split across spanned rows
+                isUp = close[i] >= open[i]        // bar classed as buy vs sell
                 for r = loIdx to hiIdx
                     array.set(rowVols, r, array.get(rowVols, r) + share)
-    [rowVols, rangeLow, rowHeight]
+                    if isUp
+                        array.set(rowUp, r, array.get(rowUp, r) + share)
+                    else
+                        array.set(rowDn, r, array.get(rowDn, r) + share)
+    [rowVols, rowUp, rowDn, rangeLow, rowHeight]
 
 // =============================================================================
 // LVN EXTRACTION  (WIDTH cutoff, NOT prominence)
@@ -163,7 +185,8 @@ buildProfile(int n) =>
 // whose normalized width is < lvnCutoff is a low-volume row. Contiguous low rows
 // are merged into one zone whose band = combined height of those rows. This is a
 // simple WIDTH threshold (the bottom ~12.5% of volume), not a peak/valley
-// prominence test.
+// prominence test. The outer `edgeRowsToIgnore` rows are skipped so only
+// INTERIOR low-volume pinch points are returned (not the natural taper).
 // Returns parallel arrays of zone bottoms and tops.
 // =============================================================================
 extractLvns(array<float> rowVols, float rangeLow, float rowHeight) =>
@@ -171,15 +194,16 @@ extractLvns(array<float> rowVols, float rangeLow, float rowHeight) =>
     maxVol = array.max(rowVols)
     bottoms = array.new_float()
     tops    = array.new_float()
-    if maxVol > 0 and rowHeight > 0
+    loR = edgeRowsToIgnore
+    hiR = rows - 1 - edgeRowsToIgnore
+    if maxVol > 0 and rowHeight > 0 and hiR >= loR
         int runStart = na
-        for r = 0 to rows - 1
-            norm = array.get(rowVols, r) / maxVol        // normalized width
-            isLow = norm < lvnCutoff
+        for r = loR to hiR
+            isLow = (array.get(rowVols, r) / maxVol) < lvnCutoff   // normalized width
             if isLow and na(runStart)
-                runStart := r                            // open a new run
-            if (not isLow or r == rows - 1) and not na(runStart)
-                // Close the run. If the last row itself is low, include it.
+                runStart := r                                      // open a new run
+            if (not isLow or r == hiR) and not na(runStart)
+                // Close the run. If the boundary row itself is low, include it.
                 runEnd = (not isLow) ? r - 1 : r
                 array.push(bottoms, rangeLow + runStart * rowHeight)
                 array.push(tops,    rangeLow + (runEnd + 1) * rowHeight)
@@ -187,33 +211,70 @@ extractLvns(array<float> rowVols, float rangeLow, float rowHeight) =>
     [bottoms, tops]
 
 // =============================================================================
-// HISTOGRAM  (one polyline per profile, drawn LEFT of the open anchor)
+// HISTOGRAM  (native-SVP look: stacked UP/DOWN bars + POC, anchored LEFT at the
+// session open, extending RIGHT)
 // -----------------------------------------------------------------------------
-// The fattest row reaches the full profile width; thinner rows are shorter. The
-// silhouette is traced row-by-row as a single polyline so 100 rows cost ONE
-// drawing object instead of 100.
+// Two FILLED polylines per profile keep the object count tiny (2 vs 100+ boxes):
+//   * up   = filled region from the open baseline out to each row's up length
+//   * dn   = filled band from each row's up length out to its total length
+// Each row's right edge is a horizontal step, so the silhouette reads as a
+// stacked buy/sell volume profile. The POC line marks the fattest row.
 // =============================================================================
-drawHistogram(array<float> rowVols, float rangeLow, float rowHeight,
-     int anchorBar, color col) =>
+drawHistogram(array<float> rowVols, array<float> rowUp, array<float> rowDn,
+     float rangeLow, float rowHeight, int anchorBar, int endBar) =>
     rows = array.size(rowVols)
     maxVol = array.max(rowVols)
-    polyline pl = na
+    polyline plUp = na
+    polyline plDn = na
+    line     lnPoc = na
     if showHistogram and maxVol > 0 and rowHeight > 0
-        pts = array.new<chart.point>()
+        rangeHigh = rangeLow + rows * rowHeight
+        upPts = array.new<chart.point>()
+        dnPts = array.new<chart.point>()
+        // UP polygon: baseline (x = anchor) up the left edge, stepped right edge.
+        array.push(upPts, chart.point.from_index(anchorBar, rangeLow))
         for r = 0 to rows - 1
-            len = math.round(boxWidthBars * (array.get(rowVols, r) / maxVol))
-            yMid = rangeLow + (r + 0.5) * rowHeight
-            array.push(pts, chart.point.from_index(anchorBar - len, yMid))
-        pl := polyline.new(pts, closed = false,
-             line_color = color.new(col, 55), line_width = 1)
-    pl
+            uLen = math.round(profileWidthBars * array.get(rowUp, r) / maxVol)
+            yLo = rangeLow + r * rowHeight
+            yHi = rangeLow + (r + 1) * rowHeight
+            array.push(upPts, chart.point.from_index(anchorBar + uLen, yLo))
+            array.push(upPts, chart.point.from_index(anchorBar + uLen, yHi))
+        array.push(upPts, chart.point.from_index(anchorBar, rangeHigh))
+        plUp := polyline.new(upPts, closed = true,
+             line_color = color.new(upColor, 60), fill_color = upColor,
+             line_width = 1)
+        // DOWN polygon: outer edge = total length (ascending), inner edge = up
+        // length (descending) -> fills the buy/sell delta band.
+        for r = 0 to rows - 1
+            tLen = math.round(profileWidthBars * array.get(rowVols, r) / maxVol)
+            yLo = rangeLow + r * rowHeight
+            yHi = rangeLow + (r + 1) * rowHeight
+            array.push(dnPts, chart.point.from_index(anchorBar + tLen, yLo))
+            array.push(dnPts, chart.point.from_index(anchorBar + tLen, yHi))
+        for k = 0 to rows - 1
+            r = rows - 1 - k                  // walk the inner (up) edge back down
+            uLen = math.round(profileWidthBars * array.get(rowUp, r) / maxVol)
+            yLo = rangeLow + r * rowHeight
+            yHi = rangeLow + (r + 1) * rowHeight
+            array.push(dnPts, chart.point.from_index(anchorBar + uLen, yHi))
+            array.push(dnPts, chart.point.from_index(anchorBar + uLen, yLo))
+        plDn := polyline.new(dnPts, closed = true,
+             line_color = color.new(downColor, 60), fill_color = downColor,
+             line_width = 1)
+        // POC line: fattest row, spanning the whole session width.
+        if showPOC
+            pocRow = array.indexof(rowVols, maxVol)
+            pocY = rangeLow + (pocRow + 0.5) * rowHeight
+            lnPoc := line.new(anchorBar, pocY, endBar, pocY, color = pocColor,
+                 width = 1)
+    [plUp, plDn, lnPoc]
 
 // =============================================================================
 // PRUNING  (FIFO by count - keeps object totals deterministic and bounded)
 // =============================================================================
 pruneZones(array<LvnZone> zones, int keep) =>
-    // We allow several zones per profile, so cap zones at keep * (rough zones
-    // per profile). Kept conservative so both tracks stay under the 500-box cap.
+    // Several zones per profile, so cap at keep * (rough zones/profile). Kept
+    // conservative so both tracks stay under the 500-box cap.
     maxZones = keep * 8
     while array.size(zones) > maxZones
         z = array.shift(zones)
@@ -223,42 +284,41 @@ pruneZones(array<LvnZone> zones, int keep) =>
 pruneViz(array<ProfileViz> vizArr, int keep) =>
     while array.size(vizArr) > keep
         v = array.shift(vizArr)
-        if not na(v.anchorLn)
-            line.delete(v.anchorLn)
-        if not na(v.hist)
-            polyline.delete(v.hist)
+        if not na(v.up)
+            polyline.delete(v.up)
+        if not na(v.dn)
+            polyline.delete(v.dn)
+        if not na(v.poc)
+            line.delete(v.poc)
 
 // =============================================================================
 // PROFILE CONSTRUCTION  (build a range's profile, draw it, register its zones)
 // =============================================================================
-makeProfile(int n, int anchorBar, bool isWeekly, color col) =>
+makeProfile(int n, int anchorBar, int endBar, bool isWeekly, color col) =>
     if n >= 1
-        [rowVols, rangeLow, rowHeight] = buildProfile(n)
+        [rowVols, rowUp, rowDn, rangeLow, rowHeight] = buildProfile(n)
         if not na(rangeLow) and rowHeight > 0
-            // --- histogram + anchor line ---
-            pl = drawHistogram(rowVols, rangeLow, rowHeight, anchorBar, col)
-            line ln = na
-            if showAnchorLine
-                ln := line.new(anchorBar, rangeLow, anchorBar,
-                     rangeLow + rowHeight * rowsPerProfile,
-                     color = color.new(col, 40), width = 1)
-            viz = ProfileViz.new(isWeekly, ln, pl)
+            // --- histogram (up/down bars + POC) ---
+            [plUp, plDn, lnPoc] = drawHistogram(rowVols, rowUp, rowDn, rangeLow,
+                 rowHeight, anchorBar, endBar)
+            viz = ProfileViz.new(isWeekly, plUp, plDn, lnPoc)
             if isWeekly
                 array.push(weeklyViz, viz)
                 pruneViz(weeklyViz, maxLookback)
             else
                 array.push(dailyViz, viz)
                 pruneViz(dailyViz, maxLookback)
-            // --- LVN zones -> boxes ---
+            // --- LVN zones -> boxes (interior pinch points) ---
             // (`for 0 to size-1` simply does not run when size == 0.)
             [bottoms, tops] = extractLvns(rowVols, rangeLow, rowHeight)
             for i = 0 to array.size(bottoms) - 1
                 zb = array.get(bottoms, i)
                 zt = array.get(tops, i)
-                // Box: right edge ON the open anchor, extends LEFT boxWidthBars.
-                bx = box.new(anchorBar - boxWidthBars, zt, anchorBar, zb,
+                // Box sits ON the profile: left edge at the open anchor,
+                // extending RIGHT across the profile width.
+                bx = box.new(anchorBar, zt, anchorBar + profileWidthBars, zb,
                      border_color = col, border_width = 1,
-                     bgcolor = color.new(col, 80))
+                     bgcolor = color.new(col, 75))
                 z = LvnZone.new(zt, zb, 0, false, isWeekly, bar_index, col, bx)
                 if isWeekly
                     array.push(weeklyZones, z)
@@ -313,8 +373,8 @@ if newSession and barstate.isconfirmed
         // The just-closed WEEK spans [weekOpenBar .. bar_index-1]; anchor at its
         // (Sunday) open. The week's final day is captured by this weekly profile
         // rather than a separate daily one.
-        nWeek = bar_index - weekOpenBar
-        makeProfile(nWeek, weekOpenBar, true, weeklyColor)
+        makeProfile(bar_index - weekOpenBar, weekOpenBar, bar_index - 1, true,
+             weeklyColor)
         // Start the new week fresh: carry forward ONLY current-week daily LVNs,
         // so clear whatever daily zones remain from the week that just ended.
         if array.size(dailyZones) > 0
@@ -327,9 +387,9 @@ if newSession and barstate.isconfirmed
     else
         // The just-closed DAY spans [dayOpenBar .. bar_index-1]; anchor at its
         // open. Color by the weekday captured when that session opened.
-        nDay = bar_index - dayOpenBar
-        color dayCol = array.get(weekdayPalette, dayOpenDow - 1)
-        makeProfile(nDay, dayOpenBar, false, dayCol)
+        dayCol = array.get(weekdayPalette, dayOpenDow - 1)
+        makeProfile(bar_index - dayOpenBar, dayOpenBar, bar_index - 1, false,
+             dayCol)
     // Roll the day window forward to this new session's open.
     dayOpenBar := bar_index
     dayOpenDow := dayofweek
