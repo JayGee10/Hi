@@ -291,14 +291,14 @@ mitigate(array<LvnZone> zones) =>
                     z.count := overlap ? z.count + 1 : 0
                 if z.count >= candlesToMitigate
                     z.mitigated := true
-                    if mitigatedStyleDelete
-                        if not na(z.bx)
-                            box.delete(z.bx)
-                            z.bx := na
-                    else
-                        if not na(z.bx)
-                            box.set_border_color(z.bx, greyColor)
-                            box.set_bgcolor(z.bx, color.new(greyColor, 80))
+                    // Two independent `if`s (no else) so the block has no
+                    // mismatched-branch return type (CE10235).
+                    if mitigatedStyleDelete and not na(z.bx)
+                        box.delete(z.bx)
+                        z.bx := na
+                    if (not mitigatedStyleDelete) and not na(z.bx)
+                        box.set_border_color(z.bx, greyColor)
+                        box.set_bgcolor(z.bx, color.new(greyColor, 80))
 
 // =============================================================================
 // MAIN  (boundary detection + orchestration)
