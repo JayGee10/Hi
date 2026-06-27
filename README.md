@@ -54,8 +54,36 @@ The loader auto-detects both:
 Finer bars → more accurate profiles. The backtest lookahead auto-scales to the
 file's bar size.
 
+## TradingView indicator (Pine Script v6)
+
+`lvn_volume_profile.pine` is a standalone TradingView overlay indicator that
+builds the same kind of manual fixed-range volume profiles on a live chart and
+draws **unmitigated Low Volume Node (LVN)** boxes. It is independent of the
+Python backtest above (which stays the research/validation side).
+
+- **Two tracks:** a profile for the **last completed week** (Sun open → Fri
+  close) and a **per-day** profile (prior day + still-unmitigated LVNs carried
+  forward from earlier in the current week).
+- **Session-agnostic:** it profiles whatever bars the chart shows — no RTH/ETH
+  input. Day/week boundaries come from the chart's own session (`time("D")`,
+  which rolls at the 6pm-ET futures open) and `dayofweek`.
+- **LVNs by width, not prominence:** rows are normalized to the fattest row;
+  rows below the cutoff (default 0.125) are LVNs; contiguous LVN rows merge into
+  one zone/box anchored on the **left** at the session open.
+- **Mitigation:** counts bars whose high-low overlaps a zone's price band
+  (cumulative or consecutive); at the threshold (default 4) the box is deleted
+  or greyed.
+
+Usage: open the TradingView Pine editor, paste the file, **Add to chart**.
+Recommended on intraday futures (e.g. ES/NQ, 3m–15m); very low timeframes make a
+week span more bars than the profile look-back and are not recommended. All
+behavior (rows, cutoff, box width, mitigation mode/threshold, per-weekday colors,
+weekly color, lookback, delete-vs-grey) is configurable in the settings.
+
 ## Files
 
+- `lvn_volume_profile.pine` – TradingView v6 indicator: weekly + per-day volume
+  profiles with unmitigated-LVN boxes
 - `sessions.py` – UTC→ET conversion and CME RTH/ETH session grouping
 - `volume_profile.py` – per-session profile → POC/VAH/VAL, LVNs
 - `data.py` – CSV / NinjaTrader loader + synthetic data generator
