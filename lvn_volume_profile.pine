@@ -309,21 +309,23 @@ makeProfile(int n, int anchorBar, int endBar, bool isWeekly, color col) =>
                 array.push(dailyViz, viz)
                 pruneViz(dailyViz, maxLookback)
             // --- LVN zones -> boxes (interior pinch points) ---
-            // (`for 0 to size-1` simply does not run when size == 0.)
+            // Guard the size: Pine's `for` auto-counts down, so `0 to size-1`
+            // with an empty array becomes `0 to -1` and would still run at i=0.
             [bottoms, tops] = extractLvns(rowVols, rangeLow, rowHeight)
-            for i = 0 to array.size(bottoms) - 1
-                zb = array.get(bottoms, i)
-                zt = array.get(tops, i)
-                // Box sits ON the profile: left edge at the open anchor,
-                // extending RIGHT across the profile width.
-                bx = box.new(anchorBar, zt, anchorBar + profileWidthBars, zb,
-                     border_color = col, border_width = 1,
-                     bgcolor = color.new(col, 75))
-                z = LvnZone.new(zt, zb, 0, false, isWeekly, bar_index, col, bx)
-                if isWeekly
-                    array.push(weeklyZones, z)
-                else
-                    array.push(dailyZones, z)
+            if array.size(bottoms) > 0
+                for i = 0 to array.size(bottoms) - 1
+                    zb = array.get(bottoms, i)
+                    zt = array.get(tops, i)
+                    // Box sits ON the profile: left edge at the open anchor,
+                    // extending RIGHT across the profile width.
+                    bx = box.new(anchorBar, zt, anchorBar + profileWidthBars, zb,
+                         border_color = col, border_width = 1,
+                         bgcolor = color.new(col, 75))
+                    z = LvnZone.new(zt, zb, 0, false, isWeekly, bar_index, col, bx)
+                    if isWeekly
+                        array.push(weeklyZones, z)
+                    else
+                        array.push(dailyZones, z)
             if isWeekly
                 pruneZones(weeklyZones, maxLookback)
             else
