@@ -9,3 +9,5 @@ venv/
 *.html
 *.Last.txt
 *.joblib
+# local market-data exports (uploaded per session, not committed)
+data_mnq/

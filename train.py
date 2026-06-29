@@ -69,22 +69,40 @@ def hold_rate_by_shape(df: pd.DataFrame) -> None:
                   f"{grp['label'].mean():5.1%}  ({len(grp)} tests)")
 
 
-def train(df: pd.DataFrame):
+def _split(df: pd.DataFrame, X: np.ndarray, y: np.ndarray, test_size: float):
+    """Time-ordered (walk-forward) split: train on the past, test on the future.
+
+    Financial series leak future into past under a random split, which flatters
+    the score. Sorting by the tested session and cutting at a date is the honest
+    evaluation. Falls back to a random split if no session timestamp is present.
+    """
+    if "session" not in df.columns:
+        from sklearn.model_selection import train_test_split
+        return (*train_test_split(X, y, test_size=test_size, random_state=7,
+                                  stratify=y), "random")
+    order = np.argsort(df["session"].values, kind="stable")
+    cut = int(len(order) * (1 - test_size))
+    tr, te = order[:cut], order[cut:]
+    return X[tr], X[te], y[tr], y[te], "walk-forward"
+
+
+def train(df: pd.DataFrame, test_size: float = 0.25):
     from sklearn.ensemble import GradientBoostingClassifier
     from sklearn.linear_model import LogisticRegression
     from sklearn.metrics import accuracy_score, roc_auc_score
-    from sklearn.model_selection import train_test_split
 
     X, cols = encode(df)
+    Xv = X.values
     y = df["label"].values
 
     if y.sum() in (0, len(y)):
         print("\nonly one class present — cannot train a classifier.")
         return None, cols
 
-    X_tr, X_te, y_tr, y_te = train_test_split(
-        X.values, y, test_size=0.25, random_state=7, stratify=y
-    )
+    X_tr, X_te, y_tr, y_te, split_kind = _split(df, Xv, y, test_size)
+    if y_te.sum() in (0, len(y_te)):
+        print(f"\n{split_kind} test fold has one class only — skipping.")
+        return None, cols
 
     # Majority-class baseline: how good is "always predict the common outcome"?
     majority = int(round(y_tr.mean()))
@@ -94,7 +112,8 @@ def train(df: pd.DataFrame):
         "logistic": LogisticRegression(max_iter=1000, class_weight="balanced"),
         "gboost": GradientBoostingClassifier(random_state=7),
     }
-    print("\n=== Model performance (25% hold-out) ===")
+    print(f"\n=== Model performance ({split_kind} split, "
+          f"{len(y_te)} test / {len(y_tr)} train) ===")
     print(f"  {'majority baseline':22s} acc={base_acc:5.1%}")
     best, best_auc = None, -1.0
     for name, model in models.items():
@@ -106,8 +125,35 @@ def train(df: pd.DataFrame):
         if auc > best_auc:
             best, best_auc = model, auc
 
+    _walk_forward_cv(df, Xv, y)
     _feature_importance(best, cols)
     return best, cols
+
+
+def _walk_forward_cv(df: pd.DataFrame, X: np.ndarray, y: np.ndarray,
+                     n_splits: int = 5) -> None:
+    """Expanding-window walk-forward CV — a less noisy estimate than one fold."""
+    from sklearn.ensemble import GradientBoostingClassifier
+    from sklearn.metrics import accuracy_score, roc_auc_score
+    from sklearn.model_selection import TimeSeriesSplit
+
+    if "session" in df.columns:
+        order = np.argsort(df["session"].values, kind="stable")
+        X, y = X[order], y[order]
+    if len(y) < (n_splits + 1) * 10:
+        n_splits = max(2, len(y) // 20)
+
+    accs, aucs = [], []
+    for tr, te in TimeSeriesSplit(n_splits=n_splits).split(X):
+        if y[tr].sum() in (0, len(tr)) or y[te].sum() in (0, len(te)):
+            continue
+        m = GradientBoostingClassifier(random_state=7).fit(X[tr], y[tr])
+        accs.append(accuracy_score(y[te], m.predict(X[te])))
+        aucs.append(roc_auc_score(y[te], m.predict_proba(X[te])[:, 1]))
+    if aucs:
+        print(f"\n=== Walk-forward CV (gboost, {len(aucs)} folds) ===")
+        print(f"  acc {np.mean(accs):5.1%} ± {np.std(accs):4.1%}   "
+              f"auc {np.mean(aucs):.3f} ± {np.std(aucs):.3f}")
 
 
 def _feature_importance(model, cols: list[str], top: int = 10) -> None:

@@ -86,6 +86,7 @@ def _rows_for_timeframe(
 
             conf = _confluent(level, weekly, a) if timeframe == "daily" else False
             rows.append({
+                "session": cur_key,   # timestamp of the session tested (for time-ordered splits)
                 "timeframe": timeframe,
                 "level_name": name,
                 "shape": shape,
