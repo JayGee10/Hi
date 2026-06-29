@@ -54,10 +54,44 @@ The loader auto-detects both:
 Finer bars → more accurate profiles. The backtest lookahead auto-scales to the
 file's bar size.
 
+## Profile shapes & ML
+
+On top of the backtest there's a small ML layer built around the four canonical
+volume-profile **shapes**:
+
+- **D** – balanced/normal: POC mid-range, symmetric → balance, mean-revert to POC
+- **P** – POC high with a thin tail below → bullish (short-covering / accumulation)
+- **b** – POC low with a thin tail above → bearish (long liquidation / distribution)
+- **B** – double distribution: two nodes split by an LVN → the LVN is the decision point
+- **trend** – elongated/thin, no dominant node → one-timeframe directional day
+
+`shapes.py` classifies each session's histogram and exposes the numeric features
+behind the call (POC position in range, volume skew, mode count, value-area
+width, concentration). `dataset.py` turns sessions into a labeled table —
+shape + level + context features → does the next session **hold or break** the
+prior level — and `train.py` fits sklearn models to predict it.
+
+```bash
+python train.py                    # synthetic data (out of the box)
+python train.py a.txt b.txt ...    # one or more intraday OHLCV files (UTC)
+python test_shapes.py              # sanity-check the shape classifier
+```
+
+`train.py` prints hold-rate **by shape** (the raw signal), compares a logistic
+and a gradient-boosting model against a majority-class baseline (accuracy + AUC),
+lists the top features, and saves the model to `vp_model.joblib`. Note the
+synthetic generator is mean-reverting noise with no real shape→outcome
+structure, so the models there sit near the baseline — point it at real intraday
+futures data to see whether the shapes carry an edge.
+
 ## Files
 
 - `sessions.py` – UTC→ET conversion and CME RTH/ETH session grouping
 - `volume_profile.py` – per-session profile → POC/VAH/VAL, LVNs
+- `shapes.py` – classify the profile shape (D/P/b/B/trend) + shape features
+- `dataset.py` – build the labeled (features → hold/break) training table
+- `train.py` – train & evaluate the hold/break classifier, save the model
+- `test_shapes.py` – sanity tests for the shape classifier
 - `data.py` – CSV / NinjaTrader loader + synthetic data generator
 - `backtest.py` – runs the daily/weekly session tests and prints the summary
 - `build_html.py` – builds the interactive phone chart
